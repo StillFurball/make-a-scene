@@ -24,18 +24,20 @@
   <div class="tag">LIVE · GOLDEN HOUR</div>
   <h1>Belgian Ardennes Circuit</h1>
   <p>Lembah "Red Water" &amp; tanjakan curam gaya Raidillon</p>
-  <div class="cars">
-    <div class="car"><i style="background:linear-gradient(90deg,#1fe0ff,#0a2bb8)"></i><b>F-Style Open Wheel Racer</b><span id="spdA">0 km/j</span></div>
-    <div class="car"><i style="background:linear-gradient(90deg,#b5121b,#111)"></i><b>LM-Style Endurance Hypercar</b><span id="spdB">0 km/j</span></div>
-  </div>
+  <!-- one button per car, filled in by main.js; click to point the cameras at that car -->
+  <div class="cars"></div>
 </div>
 
-<div id="hint" class="panel">Seret: putar · Scroll: zoom · Klik kanan: geser</div>
+<div id="hint" class="panel">Seret: putar · Scroll: zoom · Klik kanan: geser · Klik mobil: pilih kamera</div>
 
 <div id="controls" class="panel">
-  <button data-mode="lowangle" class="active">Low-Angle</button>
-  <button data-mode="follow">Ikuti Orbit</button>
+  <button id="sceneStart">Race Start</button>
+  <button id="sceneOvertake">Overtake</button>
+  <span class="sep"></span>
+  <button data-mode="lowangle">Low-Angle</button>
+  <button data-mode="follow" class="active">Ikuti Orbit</button>
   <button data-mode="chase">Chase Cam</button>
+  <button data-mode="onboard">Onboard</button>
   <button data-mode="aerial">Udara</button>
   <label>Kecepatan <input id="speed" type="range" min="0.2" max="2" step="0.05" value="1"></label>
   <button id="pause">Jeda</button>
