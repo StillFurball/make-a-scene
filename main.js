@@ -25,7 +25,7 @@ renderer.toneMappingExposure = 1.05;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0xd9a882, 140, 820);
+scene.fog = new THREE.Fog(0xd9a882, 160, 1150);
 
 const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 4000);
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -33,7 +33,7 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.maxPolarAngle = Math.PI * 0.62;   // allow low "looking-up" angles
 controls.minDistance = 3;
-controls.maxDistance = 600;
+controls.maxDistance = 900;
 
 /* =====================================================================
    2. SKY + LIGHTING (golden hour)
@@ -101,19 +101,38 @@ scene.add(hemi, ambient, sun, sun.target);
    3. TRACK (CatmullRomCurve3 + custom ribbon geometry)
    ===================================================================== */
 const TRACK_HALF_W = 9;
-const N = 1400; // samples along the loop
 
-// Hairpin -> downhill straight -> dip (Red Water) -> esses climbing (Raidillon) -> crest -> long straight -> return loop
-// The hairpin is a ~28 m arc: its radius must stay above TRACK_HALF_W + 8.5 or the inner guardrail folds over itself
+// Spa-style lap: T1 hairpin -> downhill -> dip (Red Water) -> esses climbing (Raidillon) -> crest -> long straight ->
+// right-hander at the top -> sweeping return -> chicane -> start/finish straight -> T1.
+// Corner radii must stay above TRACK_HALF_W + 8.5 (hairpin: 20 m) or the inner guardrail folds over itself
 const controlPoints = [
-  [-121, 18, 56], [-80, 12, 50], [-40, 4, 40], [-10, 0, 30],
-  [5, 1.5, 18], [10, 6, 0], [5, 12, -20], [12, 18, -45],
-  [25, 23, -80], [50, 25, -120], [90, 25, -140], [130, 22, -110],
-  [140, 19, -40], [120, 17, 40], [70, 18, 100], [-20, 20, 120],
-  [-100, 20, 113], [-123, 19.6, 111], [-141, 19.2, 103], [-149, 18.8, 84], [-141, 18.4, 65]
+  [-150, 21, 119], [-100, 14, 96], [-55, 5, 70], [-15, 0, 48],
+  [7.5, 1.9, 27], [15, 7.5, 0], [7.5, 15, -30], [18, 22.5, -67.5],
+  [37.5, 28.8, -120], [75, 31.3, -180], [135, 31.3, -210], [195, 27.5, -165],
+  [210, 23.8, -60], [180, 21.3, 60], [110, 22.5, 145], [88, 23.5, 152],
+  [70, 23.5, 152], [64, 23.5, 152.9], [58.6, 23.5, 155.6], [54.2, 23.5, 159.7],
+  [51.3, 23.5, 165], [48.3, 23.5, 170.3], [43.9, 23.5, 174.4], [38.5, 23.5, 177.1],
+  [32.5, 23.5, 178], [14.5, 23.8, 178], [-40, 25, 178], [-110, 25, 178],
+  [-165, 25, 178], [-190, 25, 178], [-197.7, 25, 176.5], [-204.2, 25, 172.1],
+  [-208.5, 25, 165.6], [-210, 25, 157.9], [-208.4, 25, 150.2], [-204, 25, 143.8],
+  [-197.5, 25, 139.5]
 ].map(p => new THREE.Vector3(...p));
 
-const curve = new THREE.CatmullRomCurve3(controlPoints, true, 'centripetal');
+// Catmull-Rom is only C1: its curvature, and with it a car's yaw rate, jumps at every control point.
+// Resampling every ~2 m and averaging neighbours gives a centreline whose curvature changes smoothly.
+const curve = (() => {
+  const rough = new THREE.CatmullRomCurve3(controlPoints, true, 'centripetal');
+  rough.arcLengthDivisions = 20000;
+  const M = Math.round(rough.getLength() / 2);
+  let pts = rough.getSpacedPoints(M).slice(0, M);
+  for (let pass = 0; pass < 8; pass++) {
+    pts = pts.map((p, i) => p.clone().add(pts[(i + M - 1) % M]).add(pts[(i + 1) % M]).divideScalar(3));
+  }
+  const c = new THREE.CatmullRomCurve3(pts, true, 'centripetal');
+  c.arcLengthDivisions = 20000;   // the default 200 makes getPointAt surge and lag inside tight corners
+  return c;
+})();
+const N = Math.round(curve.getLength() / 10) * 10;   // ~1 m per sample, a multiple of 10 for the racing-line solver
 
 // Sample frames: p (point), t (tangent), x (lateral, horizontal), y (surface normal), dist (arc length)
 const samples = [];
@@ -311,7 +330,7 @@ function createTrack() {
 scene.add(createTrack());
 
 /* ---------- 3b. Start line, grid slots, light gantry ---------- */
-const GRID_I = Math.floor(N * 0.78);            // straightest part of the back straight (radius > 400 m)
+const GRID_I = nearestTrack(-100, 178).i;      // on the start/finish straight between the chicane and the T1 hairpin
 const GRID_DIST = samples[GRID_I].dist;
 const GRID_SLOTS = [0, 1, 2, 3].map(k => ({ dist: GRID_DIST - 6 - k * 8, lat: k % 2 ? 3 : -3 }));   // staggered 2-wide
 const startLights = [];                         // one material per red light, switched in the loop
@@ -375,25 +394,28 @@ function nearestTrack(x, z) {
   return { d: Math.sqrt(best), y: samples[bi].p.y, i: bi };
 }
 
+// Radius around (0, -10) that holds the whole circuit; terrain is levelled inside it, hills rise outside
+const TRACK_R = Math.max(...samples.map(s => Math.hypot(s.p.x, s.p.z + 10)));
+
 function naturalHeight(x, z) {
   let h = 14 * Math.sin(x * 0.008 + 0.5) * Math.cos(z * 0.009)
         + 7 * Math.sin(x * 0.021 + 2.0) * Math.sin(z * 0.017 + 1.0)
         + 2.2 * Math.sin(x * 0.06) * Math.cos(z * 0.05);
   const r = Math.hypot(x, z + 10);
-  h += Math.max(0, r - 250) * 0.2;        // ring of taller hills in the distance
+  h += Math.max(0, r - TRACK_R - 70) * 0.2;   // ring of taller hills in the distance
   return h + 15;
 }
 
 const FLAT = TRACK_HALF_W + 10, BLEND = 42;
 function groundHeight(x, z) {
   const nat = naturalHeight(x, z);
-  if (Math.hypot(x, z + 10) > 240) return nat;
+  if (Math.hypot(x, z + 10) > TRACK_R + 60) return nat;
   const n = nearestTrack(x, z);
   return lerp(n.y - 0.35, nat, smoothstep(FLAT, FLAT + BLEND, n.d));
 }
 
 function createTerrain() {
-  const SIZE = 1400, SEG = 400;
+  const SIZE = 1700, SEG = 425;
   const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG).rotateX(-Math.PI / 2);
   const pos = geo.attributes.position;
   const colors = new Float32Array(pos.count * 3);
@@ -405,7 +427,7 @@ function createTerrain() {
     pos.setY(i, y);
     const noise = 0.5 + 0.5 * Math.sin(x * 0.05 + Math.cos(z * 0.04) * 2.0) * Math.cos(z * 0.031);
     c.copy(cA).lerp(cB, noise);
-    if (Math.hypot(x, z + 10) < 240) {
+    if (Math.hypot(x, z + 10) < TRACK_R + 60) {
       const d = nearestTrack(x, z).d;
       c.lerp(cMown, 1 - smoothstep(FLAT - 2, FLAT + 8, d));
     }
@@ -545,7 +567,7 @@ const standSpots = [
 /* =====================================================================
    6. PINE FOREST (instanced cones + cylinders)
    ===================================================================== */
-function createForest(count = 2200) {
+function createForest(count = 3600) {
   const trunkGeo = new THREE.CylinderGeometry(0.25, 0.4, 2.4, 6).translate(0, 1.2, 0);
   const lowGeo = new THREE.ConeGeometry(2.4, 5.2, 12).translate(0, 4.4, 0);
   const highGeo = new THREE.ConeGeometry(1.65, 4.2, 12).translate(0, 7.4, 0);
@@ -559,12 +581,12 @@ function createForest(count = 2200) {
   let placed = 0, tries = 0;
   while (placed < count && tries < count * 8) {
     tries++;
-    const ang = rand() * Math.PI * 2, rad = 25 + Math.sqrt(rand()) * 520;
+    const ang = rand() * Math.PI * 2, rad = 25 + Math.sqrt(rand()) * 680;
     const x = Math.cos(ang) * rad, z = Math.sin(ang) * rad - 10;
     // patchy forest density
     const dens = 0.5 + 0.5 * Math.sin(x * 0.018 + 1.3) * Math.cos(z * 0.021 - 0.4);
     if (rand() > dens + 0.25) continue;
-    if (Math.hypot(x, z + 10) < 260 && nearestTrack(x, z).d < TRACK_HALF_W + 15) continue;
+    if (Math.hypot(x, z + 10) < TRACK_R + 80 && nearestTrack(x, z).d < TRACK_HALF_W + 15) continue;
     if (standSpots.some(s => Math.hypot(s.x - x, s.z - z) < 34)) continue;
     const s = 0.7 + rand() * 0.9;
     pos.set(x, groundHeight(x, z) - 0.2, z);
@@ -963,6 +985,9 @@ const LOAD_MAX = 3.5 * G;             // tyres saturate here, however hard a dip
 const wrap = i => ((i % N) + N) % N;
 const clamp = THREE.MathUtils.clamp;
 
+// Catmull-Rom through four evenly spaced values, t in [0, 1] between b and c
+const cr = (a, b, c, d, t) => 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (3 * b - a - 3 * c + d) * t * t * t);
+
 // Racing line: lateral offset from the centreline at every sample. A coarse chain of points (one per 10 samples,
 // each free to slide across the road) is relaxed until it bends as little as possible -> outside-inside-outside.
 const lineLat = (() => {
@@ -977,16 +1002,26 @@ const lineLat = (() => {
     }
   }
   // Catmull-Rom between the coarse points so the line has no kinks
-  const cr = (a, b, c, d, t) => 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (3 * b - a - 3 * c + d) * t * t * t);
   const oc = c => o[(c % M + M) % M];
-  return Float64Array.from({ length: N }, (_, i) => {
+  let line = Array.from({ length: N }, (_, i) => {
     const c = Math.floor(i / STEP);
     return clamp(cr(oc(c - 1), oc(c), oc(c + 1), oc(c + 2), (i % STEP) / STEP), -LAT_LIM, LAT_LIM);
   });
+  // The clamp leaves a kink where the line meets the kerb at an angle (a yaw jolt); averaging rounds it, inside the limits
+  for (let pass = 0; pass < 2; pass++) {
+    line = line.map((_, i) => { let s = 0; for (let j = -8; j <= 8; j++) s += line[wrap(i + j)]; return s / 17; });
+  }
+  return line;
 })();
+// Per-sample value interpolated at a distance, so limits and slopes ramp instead of stepping every sample
+const interp = (arr, d) => {
+  const f = (((d % TRACK_LEN) + TRACK_LEN) % TRACK_LEN) / DS, i = Math.floor(f) % N;
+  return lerp(arr[i], arr[(i + 1) % N], f - Math.floor(f));
+};
+// Cubic, not linear: a polyline offset would kink the car's heading at every sample (visible in slow corners)
 const lineAt = d => {
   const f = (((d % TRACK_LEN) + TRACK_LEN) % TRACK_LEN) / DS, i = Math.floor(f) % N;
-  return lerp(lineLat[i], lineLat[(i + 1) % N], f - Math.floor(f));
+  return cr(lineLat[wrap(i - 1)], lineLat[i], lineLat[wrap(i + 1)], lineLat[wrap(i + 2)], f - Math.floor(f));
 };
 const sampleIndex = d => Math.floor((((d % TRACK_LEN) + TRACK_LEN) % TRACK_LEN) / DS) % N;
 
@@ -1007,26 +1042,27 @@ const kappa = heading.map((_, i) => {
 // Vertical curvature (1/m): + in a dip (compression), - over a crest (the car goes light)
 const kappaV = heading.map((_, i) => (Math.asin(samples[wrap(i + 4)].t.y) - Math.asin(samples[wrap(i - 4)].t.y)) / (8 * DS));
 const gNormal = heading.map((_, i) => G * Math.hypot(samples[i].t.x, samples[i].t.z));   // gravity pressing onto a sloped road
+const slope = heading.map((_, i) => samples[i].t.y);
 
 // Per-kg car model. mu: tyre friction; aero: downforce per v^2; power: W/kg; drag: a = drag v^2; soft: suspension travel
 const OW = { mu: 1.75, aero: 0.0035, power: 700, drag: 0.0010, soft: 1 };
 const HC = { mu: 1.55, aero: 0.0024, power: 520, drag: 0.0006, soft: 1.6 };
 
 // Normal force per kg: gravity + downforce + the road pushing up in a dip / falling away over a crest
-const load = (c, v, i) => clamp(gNormal[i] + (c.aero + kappaV[i]) * v * v, 0, LOAD_MAX);
+const load = (c, v, gN, kV) => clamp(gN + (c.aero + kV) * v * v, 0, LOAD_MAX);
 // Fastest a corner can be taken: mu * load(v) = v^2 * curvature
-const cornerSpeed = (c, k, i) => {
-  const d = Math.abs(k) - c.mu * (c.aero + kappaV[i]);
-  return Math.min(d > 1e-5 ? Math.sqrt(c.mu * gNormal[i] / d) : Infinity, Math.sqrt(c.mu * LOAD_MAX / Math.abs(k)));
+const cornerSpeed = (c, k, gN, kV) => {
+  const d = Math.abs(k) - c.mu * (c.aero + kV);
+  return Math.min(d > 1e-5 ? Math.sqrt(c.mu * gN / d) : Infinity, Math.sqrt(c.mu * LOAD_MAX / Math.abs(k)));
 };
 // Highest speed at every sample (on the racing line) from which the car can still brake for what lies ahead
 function speedProfile(c) {
   const vTop = Math.cbrt(c.power / c.drag);                     // where drag eats all the power
-  const v = kappa.map((k, i) => Math.min(vTop, cornerSpeed(c, k, i)));
+  const v = kappa.map((k, i) => Math.min(vTop, cornerSpeed(c, k, gNormal[i], kappaV[i])));
   for (let n = 2 * N; n-- > 0;) {                               // backwards, two laps so it wraps the loop
     const i = n % N, j = (i + 1) % N, vj = v[j], lat = vj * vj * Math.abs(kappa[j]);
     // grip left for braking after cornering, helped by drag and by gravity when climbing
-    const brake = Math.sqrt(Math.max(0, (c.mu * load(c, vj, j)) ** 2 - lat * lat)) + c.drag * vj * vj + G * samples[j].t.y;
+    const brake = Math.sqrt(Math.max(0, (c.mu * load(c, vj, gNormal[j], kappaV[j])) ** 2 - lat * lat)) + c.drag * vj * vj + G * slope[j];
     v[i] = Math.min(v[i], Math.sqrt(vj * vj + 2 * Math.max(0, brake) * segLen[i]));
   }
   return v;
@@ -1061,7 +1097,8 @@ function stepPhysics(dt) {
   state.raceT += dt;
   for (const r of racers) {
     if (state.raceT < r.launch) continue;              // still on the grid waiting for the lights
-    const c = r.spec, v = r.speed, i = sampleIndex(r.dist), k = kappa[i], lat0 = r.lat;
+    const c = r.spec, v = r.speed, d = r.dist, lat0 = r.lat;
+    const k = interp(kappa, d), gN = interp(gNormal, d), kV = interp(kappaV, d);
 
     // --- traffic: slipstream, don't hit the car in front, pick a side to pass
     let cap = Infinity, draft = false, near = null, ng = Infinity;
@@ -1087,17 +1124,46 @@ function stepPhysics(dt) {
     const off = Math.max(0.3, 1 - k * r.off);            // off-line: the inside is shorter but tighter
     r.curv = k / off;
     r.aLat = v * v * r.curv;
-    r.load = load(c, v, i);
+    r.load = load(c, v, gN, kV);
     const tyre = Math.sqrt(Math.max(0, (c.mu * r.load) ** 2 - r.aLat ** 2));
     const a = Math.min(TRACTION * tyre, c.power / Math.max(v, 5))
             - (draft ? 0.65 : 1) * c.drag * v * v        // slipstream cuts drag
-            - G * samples[i].t.y;                        // gravity on the slope
-    r.speed = Math.max(0, Math.min(v + a * dt, r.vmax[i], cornerSpeed(c, r.curv, i), cap));
+            - G * interp(slope, d);                      // gravity on the slope
+    r.speed = Math.max(0, Math.min(v + a * dt, interp(r.vmax, d), cornerSpeed(c, r.curv, gN, kV), cap));
     r.aLong = (r.speed - v) / dt;
-    r.dist += r.speed * dt / (segLen[i] / DS * off);     // ground speed -> progress along the centreline
+    r.dist += r.speed * dt / (interp(segLen, d) / DS * off);   // ground speed -> progress along the centreline
     r.lat = clamp(lineAt(r.dist) + r.off, -LAT_LIM, LAT_LIM);   // the line may swing toward the edge while the car is off it
     r.off = r.lat - lineAt(r.dist);
     r.latVel = (r.lat - lat0) / dt;
+  }
+  resolveCollisions();
+}
+
+// Cars are CAR_LEN x CAR_W boxes in (track distance, lateral) space. An overlap is undone along its shallower axis:
+// mostly alongside -> both are pushed apart sideways (racing side by side); nose to tail -> the car behind is held
+// back and can't go faster than the one ahead.
+const CAR_LEN = 5.6, CAR_W = 2.3;   // bodies are ~5.4 x 2.05 m including wings and wheels, plus a little air
+function resolveCollisions() {
+  for (let pass = 0; pass < 3; pass++) {               // repeat so a push into a third car gets resolved too
+    for (let a = 0; a < racers.length; a++) {
+      for (let b = a + 1; b < racers.length; b++) {
+        let r = racers[a], o = racers[b], g = gapTo(r, o);
+        if (g < 0) { [r, o] = [o, r]; g = -g; }        // r behind, o ahead
+        const dl = o.lat - r.lat, ox = CAR_LEN - g, oy = CAR_W - Math.abs(dl);
+        if (ox <= 0 || oy <= 0) continue;
+        if (ox > oy) {
+          const s = Math.sign(dl) || 1;
+          // each takes half; whatever one can't take at the edge of the track the other takes
+          const rLat = clamp(r.lat - s * oy / 2, -LAT_LIM, LAT_LIM);
+          o.lat = clamp(o.lat + s * (oy - Math.abs(r.lat - rLat)), -LAT_LIM, LAT_LIM);
+          r.lat = clamp(o.lat - s * CAR_W, -LAT_LIM, LAT_LIM);
+          for (const c of [r, o]) c.off = c.lat - lineAt(c.dist);
+        } else {
+          r.dist -= ox;
+          r.speed = Math.min(r.speed, o.speed);
+        }
+      }
+    }
   }
 }
 
@@ -1158,7 +1224,7 @@ function setFollow() {
 }
 function setAerial() {
   controls.target.set(10, 12, -10);
-  camera.position.set(-230, 190, 260);
+  camera.position.set(-345, 285, 390);
 }
 
 const modeButtons = document.querySelectorAll('#controls [data-mode]');
