@@ -616,7 +616,9 @@ const MAT = {
   spoke:  new THREE.MeshStandardMaterial({ color: 0x9aa0a8, metalness: 0.95, roughness: 0.22 }),
   glass:  new THREE.MeshPhysicalMaterial({ color: 0x0c1218, metalness: 0.3, roughness: 0.04, clearcoat: 1, clearcoatRoughness: 0.02 }),
   tail:   new THREE.MeshStandardMaterial({ color: 0x330000, emissive: 0xff1a1a, emissiveIntensity: 2.4 }),
-  head:   new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff1cc, emissiveIntensity: 2.2 })
+  head:   new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff1cc, emissiveIntensity: 2.2 }),
+  rimDark:   new THREE.MeshStandardMaterial({ color: 0x141518, metalness: 0.7, roughness: 0.35 }),
+  spokeDark: new THREE.MeshStandardMaterial({ color: 0x1c1d21, metalness: 0.75, roughness: 0.3 })
 };
 
 // Box whose back (−z) and front (+z) faces have different width/height; bottom sits at y = 0
@@ -648,14 +650,16 @@ function strut(group, a, b, r, mat) {
   return m;
 }
 
-function createWheel(r, w, accentColor) {
+// style: { rim, spoke, spokes } overrides the rim/spoke materials and the spoke-pair count
+function createWheel(r, w, accentColor, style = {}) {
   const group = new THREE.Group();
   const spin = new THREE.Group();
   group.add(spin);
+  const pairs = style.spokes ?? 5;
   addPart(spin, new THREE.CylinderGeometry(r, r, w, 48).rotateZ(Math.PI / 2), MAT.tire);
-  addPart(spin, new THREE.CylinderGeometry(r * 0.64, r * 0.64, w + 0.012, 36).rotateZ(Math.PI / 2), MAT.rim);
-  for (let k = 0; k < 5; k++) {
-    addPart(spin, new THREE.BoxGeometry(w + 0.024, 0.045, r * 1.2), MAT.spoke, 0, 0, 0, k * Math.PI / 5);
+  addPart(spin, new THREE.CylinderGeometry(r * 0.64, r * 0.64, w + 0.012, 36).rotateZ(Math.PI / 2), style.rim ?? MAT.rim);
+  for (let k = 0; k < pairs; k++) {
+    addPart(spin, new THREE.BoxGeometry(w + 0.024, 0.045 * 5 / pairs + 0.012, r * 1.2), style.spoke ?? MAT.spoke, 0, 0, 0, k * Math.PI / pairs);
   }
   const ringMat = new THREE.MeshStandardMaterial({ color: accentColor, roughness: 0.5 });
   addPart(spin, new THREE.CylinderGeometry(0.04, 0.04, w + 0.05, 6).rotateZ(Math.PI / 2), ringMat);   // centre-lock nut
@@ -772,85 +776,302 @@ function createOpenWheelCar(front, back, number) {
   return splitBody(car);
 }
 
-/* ---------- 7b. LM-Style Endurance Hypercar ---------- */
-function createHypercar(color, number) {
-  const car = new THREE.Group();
-  const red = new THREE.MeshPhysicalMaterial({ color, roughness: 0.52, metalness: 0.12, clearcoat: 0.25, clearcoatRoughness: 0.6 });
-  const matteBlack = new THREE.MeshStandardMaterial({ color: 0x0d0d0f, roughness: 0.7, metalness: 0.15 });
-  const redDS = red.clone(); redDS.side = THREE.DoubleSide;
+/* ---------- 7b. LMDh Endurance Hypercar (shape and livery after the 2023 Porsche 963) ---------- */
+// Real dimensions: 5.10 m long, 2.00 m wide, 3.148 m wheelbase, ~1.06 m tall, 18" rims on 0.71 m tyres.
+// The skin is one lofted surface: a height field over the car's plan (nose, fender crowns, canopy and engine
+// cover blended with a smooth max), rolled over at the edges into flanks that hug the wheel arches.
+// The livery is painted per pixel from the body-space position, so pin-stripes and edges stay sharp.
 
-  // Main body: side profile extruded across the width
-  const s = new THREE.Shape();
-  s.moveTo(-2.45, 0.12);
-  s.lineTo(2.25, 0.12);
-  s.quadraticCurveTo(2.5, 0.13, 2.5, 0.25);
-  s.quadraticCurveTo(2.15, 0.52, 1.35, 0.6);
-  s.lineTo(-1.1, 0.64);
-  s.quadraticCurveTo(-2.0, 0.68, -2.45, 0.8);
-  s.lineTo(-2.45, 0.12);
-  const bodyGeo = new THREE.ExtrudeGeometry(s, {
-    depth: 1.66, bevelEnabled: true, bevelThickness: 0.1, bevelSize: 0.05, bevelSegments: 4, curveSegments: 18
+// Monotone cubic through [z, value] knots (never overshoots between knots), flat beyond the ends
+function spline(knots) {
+  knots = [...knots].sort((a, b) => a[0] - b[0]);
+  const n = knots.length, xs = knots.map(k => k[0]), ys = knots.map(k => k[1]);
+  const h = xs.slice(1).map((x, i) => x - xs[i]);
+  const d = h.map((hi, i) => (ys[i + 1] - ys[i]) / hi);
+  const m = xs.map((_, i) => {
+    if (i === 0) return d[0];
+    if (i === n - 1) return d[n - 2];
+    if (d[i - 1] * d[i] <= 0) return 0;
+    const w1 = 2 * h[i] + h[i - 1], w2 = h[i] + 2 * h[i - 1];
+    return (w1 + w2) / (w1 / d[i - 1] + w2 / d[i]);
   });
-  bodyGeo.rotateY(-Math.PI / 2).translate(0.83, 0, 0);
-  addPart(car, bodyGeo, red);
+  return x => {
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[n - 1]) return ys[n - 1];
+    let k = 0;
+    while (x > xs[k + 1]) k++;
+    const t = (x - xs[k]) / h[k], t2 = t * t, t3 = t2 * t;
+    return (2 * t3 - 3 * t2 + 1) * ys[k] + (t3 - 2 * t2 + t) * h[k] * m[k] + (3 * t2 - 2 * t3) * ys[k + 1] + (t3 - t2) * h[k] * m[k + 1];
+  };
+}
 
-  // Closed fender arches over each wheel
-  const R = 0.36, WB = 1.55;
-  for (const z of [WB, -WB]) {
-    for (const sx of [-1, 1]) {
-      addPart(car, new THREE.CylinderGeometry(0.5, 0.5, 0.62, 28, 1, true, 0, Math.PI).rotateZ(Math.PI / 2), redDS, sx * 0.82, R, z);
+const HC_BODY = (() => {
+  const ZF = 2.6, ZR = -2.48, WB = 1.574, R = 0.355, RA = 0.43;   // nose, tail, half wheelbase, tyre & arch radius
+  const smax = (a, b, k) => { const q = Math.max(k - Math.abs(a - b), 0) / k; return Math.max(a, b) + q * q * k / 4; };
+  const se = (t, p) => (t = Math.abs(t)) >= 1 ? 0 : Math.pow(1 - Math.pow(t, p), 1 / p);   // superellipse section
+
+  // plan view: full width over the fenders, pinched at the doors, rounded nose corners
+  const halfW = z => 1.0
+    - 0.07 * smoothstep(1.1, 0.6, z) * smoothstep(-1.2, -0.65, z)
+    - 0.13 * smoothstep(2.2, ZF, z) ** 2
+    - 0.05 * smoothstep(-2.1, ZR, z);
+  // crest heights along the car
+  const deck    = spline([[ZF, 0.3], [2.3, 0.37], [1.8, 0.45], [1.25, 0.54], [0.6, 0.6], [-0.6, 0.63], [-1.6, 0.61], [ZR, 0.6]]);
+  const fFender = spline([[ZF, 0.42], [2.35, 0.6], [1.95, 0.79], [1.55, 0.86], [1.15, 0.84], [0.75, 0.74], [0.3, 0.6], [-0.2, 0.5], [-0.7, 0.3]]);
+  const rFender = spline([[1.0, 0.3], [0.5, 0.5], [0.0, 0.62], [-0.6, 0.78], [-1.2, 0.87], [-1.8, 0.88], [-2.25, 0.83], [ZR, 0.76]]);
+  const cover   = spline([[-0.2, 0.92], [-0.9, 0.86], [-1.6, 0.77], [-2.1, 0.7], [ZR, 0.63]]);
+  const roof    = spline([[1.18, 0.5], [1.0, 0.74], [0.75, 0.9], [0.45, 0.99], [0.15, 1.03], [-0.2, 1.03], [-0.55, 0.98], [-1.0, 0.87], [-1.5, 0.74]]);
+  const roofW   = spline([[1.18, 0.46], [0.75, 0.52], [0.0, 0.5], [-0.6, 0.4], [-1.5, 0.22]]);
+
+  // Crest height at (x, z) and how far the canopy stands above the rest (> 0 on the canopy)
+  function crown(x, z) {
+    const ax = Math.abs(x);
+    let h = deck(z);
+    h = smax(h, 0.3 + (fFender(z) - 0.3) * se((ax - 0.81) / 0.27, 3), 0.08);
+    h = smax(h, 0.3 + (rFender(z) - 0.3) * se((ax - 0.78) / 0.33, 3.5), 0.08);
+    if (z < 0) h = smax(h, 0.3 + (cover(z) - 0.3) * se(ax / 0.34, 2.2), 0.06);
+    const c = z < 1.25 && z > -1.5 ? 0.3 + (roof(z) - 0.3) * se(ax / roofW(z), 2.3) : 0;
+    return [smax(h, c, 0.05), c - h];
+  }
+  // top of the wheel-arch opening at z (-1 away from the wheels)
+  const archTop = z => {
+    for (const zc of [WB, -WB]) { const dz = z - zc; if (Math.abs(dz) < RA) return R + Math.sqrt(RA * RA - dz * dz); }
+    return -1;
+  };
+  // the nose rolls under into the splitter
+  // crest above the shoulder rolls over into the flank; a crest lower than the shoulder (bonnet between the fenders) stays put
+  const shoulder = (y, lo, t) => y > lo ? lo + (y - lo) * se(t, 4) : y;
+  const noseRoll = (y, z) => z > ZF - 0.2 ? 0.1 + (y - 0.1) * Math.sqrt(1 - 0.5 * ((z - ZF + 0.2) / 0.2) ** 2) : y;
+
+  // Cross-section at z as [x, y, canopyLift]: left flank bottom -> over the top -> right flank bottom
+  const NU = 76, NW = 6;
+  function section(z) {
+    const hw = halfW(z), arch = archTop(z);
+    const edge = crown(hw, z)[0];
+    const lo = Math.min(Math.max(0.34, arch + 0.025), edge - 0.015);   // where the shoulder turns into the flank
+    let bot = arch > 0 ? arch : z < -WB - RA ? 0.25 : 0.1;
+    bot = Math.min(bot, lo - 0.005);
+    const under = 0.03 + 0.12 * smoothstep(1.15, 0.7, z) * smoothstep(-1.15, -0.7, z);   // flank tucks in at the doors
+    const pts = [];
+    const wall = sx => { for (let k = 1; k <= NW; k++) { const s = k / NW; pts.push([sx * (hw - under * s * s), lo + (bot - lo) * s, -1]); } };
+    wall(-1); pts.reverse();
+    for (let j = 0; j <= NU; j++) {
+      const u = -1 + 2 * j / NU, x = hw * (0.35 * u + 0.65 * Math.sin(u * Math.PI / 2));
+      const [y, lift] = crown(x, z);
+      pts.push([x, shoulder(y, lo, x / hw), lift]);
     }
+    wall(1);
+    for (const p of pts) p[1] = noseRoll(p[1], z);
+    return pts;
   }
 
-  // Closed cockpit canopy + windshield
-  const canopy = addPart(car, new THREE.SphereGeometry(1, 36, 18), matteBlack, 0, 0.6, 0.05);
-  canopy.scale.set(0.56, 0.42, 1.15);
-  const ws = addPart(car, new THREE.SphereGeometry(1.012, 36, 18, Math.PI / 2 - 0.85, 1.7, 0.32, 1.0), MAT.glass, 0, 0.6, 0.05);
-  ws.scale.copy(canopy.scale);
-  for (const sx of [-1, 1]) {   // side windows
-    const sw = addPart(car, new THREE.SphereGeometry(1.012, 20, 10, sx > 0 ? Math.PI - 0.5 : -0.5, 1.0, 0.55, 0.6), MAT.glass, 0, 0.6, 0.05);
-    sw.scale.copy(canopy.scale);
+  // body-space height of the skin's top at (x, z) — used to seat lights, mirrors and the roof scoop
+  function surfaceY(x, z) {
+    const hw = halfW(z), [y] = crown(x, z), arch = archTop(z);
+    const lo = Math.min(Math.max(0.34, arch + 0.025), crown(hw, z)[0] - 0.015);
+    return noseRoll(shoulder(y, lo, x / hw), z);
+  }
+  function surfaceNormal(x, z) {
+    const e = 0.004;
+    return new THREE.Vector3(surfaceY(x - e, z) - surfaceY(x + e, z), 2 * e, surfaceY(x, z - e) - surfaceY(x, z + e)).normalize();
   }
 
-  // Shark fin
-  const fin = new THREE.Shape();
-  fin.moveTo(-0.55, 0.9); fin.lineTo(-2.3, 1.08); fin.lineTo(-2.3, 0.72); fin.lineTo(-0.9, 0.66); fin.lineTo(-0.55, 0.9);
-  const finGeo = new THREE.ExtrudeGeometry(fin, { depth: 0.03, bevelEnabled: false });
-  finGeo.rotateY(-Math.PI / 2).translate(0.015, 0, 0);
-  addPart(car, finGeo, matteBlack);
+  let geo = null;
+  function skin() {
+    if (geo) return geo;
+    // stations every 2 cm, plus a pair hugging each arch edge so the openings get crisp vertical sides
+    const zs = [];
+    for (let z = ZR; z < ZF; z += 0.02) zs.push(z);
+    zs.push(ZF);
+    for (const zc of [WB, -WB]) for (const s of [-1, 1]) zs.push(zc + s * (RA - 0.0015), zc + s * (RA + 0.0015));
+    zs.sort((a, b) => a - b);
+    const P = 2 * NW + NU + 1, pos = [], lift = [], idx = [];
+    const rings = zs.map(z => section(z));
+    rings.forEach((ring, i) => ring.forEach(([x, y, l]) => { pos.push(x, y, zs[i]); lift.push(l); }));
+    for (let i = 0; i < zs.length - 1; i++) {
+      for (let j = 0; j < P - 1; j++) {
+        const a = i * P + j, b = a + P;
+        idx.push(a, b, a + 1, a + 1, b, b + 1);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('zone', new THREE.Float32BufferAttribute(lift, 1));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    // flat caps on the nose and tail sections
+    const caps = [[rings[rings.length - 1], ZF, 1], [rings[0], ZR, -1]].map(([ring, z, dir]) => {
+      const tris = THREE.ShapeUtils.triangulateShape(ring.map(([x, y]) => new THREE.Vector2(x, y)), []);
+      const cg = new THREE.BufferGeometry();
+      cg.setAttribute('position', new THREE.Float32BufferAttribute(ring.flatMap(([x, y]) => [x, y, z]), 3));
+      cg.setAttribute('zone', new THREE.Float32BufferAttribute(ring.map(() => -1), 1));
+      cg.setIndex(tris.flatMap(t => {
+        const [a, b, c] = t, ab = [ring[b][0] - ring[a][0], ring[b][1] - ring[a][1]], ac = [ring[c][0] - ring[a][0], ring[c][1] - ring[a][1]];
+        return (ab[0] * ac[1] - ab[1] * ac[0]) * dir > 0 ? [a, b, c] : [a, c, b];
+      }));
+      cg.computeVertexNormals();
+      return cg;
+    });
+    geo = { body: g, caps };
+    return geo;
+  }
 
-  // Wide rear wing on swan-neck pillars
-  addPart(car, new THREE.BoxGeometry(1.95, 0.05, 0.42), matteBlack, 0, 1.13, -2.3);
-  addPart(car, new THREE.BoxGeometry(1.95, 0.03, 0.18), red, 0, 1.2, -2.48, 0.35);
+  return { ZF, ZR, WB, R, RA, halfW, surfaceY, surfaceNormal, skin };
+})();
+
+// Body paint: white front, accent tail sweeping forward up the flank, accent fender crowns and nose pin-stripes,
+// black lower body, wheel-exit vent, swoosh, canopy and tinted glass. Roughness / clearcoat change with the paint.
+const HC_LIVERY_GLSL = /* glsl */`
+  void livery(out vec3 col, out float rough, out float metal, out float coat) {
+    vec3 p = vLp, n = normalize(vLn);
+    float ax = abs(p.x);
+    col = vec3(0.84, 0.85, 0.86); rough = 0.26; metal = 0.0; coat = 1.0;
+
+    float zb = mix(-0.85, 0.12, smoothstep(0.3, 0.92, p.y));                     // white -> accent boundary
+    float acc = step(p.z, zb);
+    acc = max(acc, step(0.6, ax) * step(ax, 0.93) * step(1.02, p.z) * step(p.z, 2.12) * step(0.6, n.y) * step(0.77, p.y));
+    float pin = step(0.06, ax) * step(ax, 0.44) * step(1.45 + 1.1 * ax, p.z) * step(0.6, n.y) * step(p.y, 0.6) * step(0.42, fract(ax * 13.0 + 0.2));
+    acc = max(acc, pin);
+    col = mix(col, uAccent, acc);
+
+    float blk = 0.0;
+    float door = smoothstep(-1.35, -0.85, p.z) * (1.0 - smoothstep(0.45, 1.05, p.z));
+    blk = max(blk, 1.0 - step(0.27 + 0.1 * door, p.y));                            // lower body
+    float swoosh = 0.45 + 0.27 * smoothstep(-2.3, -0.3, -p.z);
+    blk = max(blk, step(0.8, ax) * step(abs(p.y - swoosh), 0.022) * step(p.z, zb - 0.06));
+    vec2 v = vec2((p.z - 1.02) / 0.13, (p.y - 0.47) / 0.21);                        // front-wheel exit gap
+    blk = max(blk, step(0.84, ax) * step(pow(abs(v.x), 4.0) + pow(abs(v.y), 4.0), 1.0));
+    blk = max(blk, step(0.35, n.z) * (1.0 - step(0.25, p.y)) * step(1.9, p.z));     // nose intake
+    blk = max(blk, step(n.z, -0.55));                                              // tail
+    if (blk > 0.5) { col = vec3(0.012); rough = 0.55; coat = 0.25; }
+
+    if (vZone > -0.004 && p.z > -0.75) {                                            // canopy
+      col = vec3(0.014); rough = 0.4; coat = 0.6;
+      bool screen = p.z > 0.16 && ax < 0.42;
+      bool side = ax > 0.24 && p.z > -0.32 && p.z < 0.62 && p.y > 0.74 && p.y < 0.93;
+      if (screen || side) { col = vec3(0.012, 0.016, 0.022); rough = 0.03; metal = 0.25; coat = 1.0; }
+      if (ax < 0.15 && p.z < 0.1 && p.z > -0.5) { col = uAccent; rough = 0.26; coat = 1.0; }   // around the roof scoop
+    }
+  }`;
+
+function hypercarPaint(accent) {
+  const m = new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.26, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.05 });
+  m.onBeforeCompile = sh => {
+    sh.uniforms.uAccent = { value: new THREE.Color(accent) };
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float zone;\nvarying vec3 vLp;\nvarying vec3 vLn;\nvarying float vZone;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLp = position; vLn = normal; vZone = zone;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', `#include <common>\nuniform vec3 uAccent;\nvarying vec3 vLp;\nvarying vec3 vLn;\nvarying float vZone;\n${HC_LIVERY_GLSL}`)
+      .replace('vec4 diffuseColor = vec4( diffuse, opacity );',
+        'vec3 lvCol; float lvRough, lvMetal, lvCoat;\nlivery(lvCol, lvRough, lvMetal, lvCoat);\nvec4 diffuseColor = vec4( lvCol, opacity );')
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = lvRough;')
+      .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor = lvMetal;')
+      .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\n#ifdef USE_CLEARCOAT\nmaterial.clearcoat *= lvCoat;\n#endif');
+  };
+  return m;
+}
+
+// Wing / fin profile in the side (z, y) plane, extruded across x
+function sideExtrude(pts, thick, x = 0) {
+  const s = new THREE.Shape(pts.map(([z, y]) => new THREE.Vector2(z, y)));
+  const g = new THREE.ExtrudeGeometry(s, { depth: thick, bevelEnabled: false });
+  return g.rotateY(-Math.PI / 2).translate(x + thick / 2, 0, 0);   // shape x -> +z, extrusion -> -x
+}
+// Inverted (downforce) aerofoil: leading edge at +z, span along x
+function aerofoil(chord, thick, span, camber = 0.05) {
+  const top = [], bot = [];
+  for (let i = 0; i <= 18; i++) {
+    const s = (1 - Math.cos(i / 18 * Math.PI)) / 2;
+    const t = 5 * thick * (0.2969 * Math.sqrt(s) - 0.126 * s - 0.3516 * s * s + 0.2843 * s ** 3 - 0.1036 * s ** 4);
+    const c = -camber * chord * 4 * s * (1 - s), z = chord * (0.5 - s);
+    top.push([z, c + t * chord]); bot.push([z, c - t * chord]);
+  }
+  const g = sideExtrude([...top, ...bot.reverse().slice(1, -1)], span);
+  return g;
+}
+
+function createHypercar(accent, number) {
+  const car = new THREE.Group();
+  const paint = hypercarPaint(accent);
+  const black = new THREE.MeshPhysicalMaterial({ color: 0x0b0b0d, roughness: 0.5, metalness: 0.2, clearcoat: 0.35, clearcoatRoughness: 0.3 });
+  const mirrorGlass = new THREE.MeshStandardMaterial({ color: 0x8a96a4, metalness: 1, roughness: 0.1 });
+  const lamp = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xe4eeff, emissiveIntensity: 2.6 });
+  const { ZF, ZR, WB, R, RA, surfaceY, surfaceNormal } = HC_BODY;
+
+  // skin + caps
+  const { body, caps } = HC_BODY.skin();
+  addPart(car, body, paint);
+  for (const c of caps) addPart(car, c, paint);
+
+  // wheel-well liners seen through the arch openings
+  const liner = new THREE.CylinderGeometry(RA - 0.01, RA - 0.01, 0.36, 28, 1, true, -0.35, Math.PI + 0.7).rotateZ(Math.PI / 2);
+  const linerMat = black.clone(); linerMat.side = THREE.DoubleSide;
+  for (const z of [WB, -WB]) for (const sx of [-1, 1]) addPart(car, liner, linerMat, sx * 0.8, R, z);
+
+  // floor, splitter, side planks, diffuser with strakes
+  addPart(car, new THREE.BoxGeometry(1.26, 0.03, 4.75), MAT.carbon, 0, 0.085, 0.15);
+  addPart(car, new THREE.BoxGeometry(1.94, 0.03, 0.34), MAT.carbon, 0, 0.09, ZF - 0.08);
   for (const sx of [-1, 1]) {
-    addPart(car, new THREE.BoxGeometry(0.04, 0.44, 0.72), red, sx * 0.99, 1.02, -2.27);
-    addPart(car, new THREE.BoxGeometry(0.05, 0.4, 0.12), matteBlack, sx * 0.35, 0.95, -2.18);
+    addPart(car, new THREE.BoxGeometry(0.34, 0.03, 2.2), MAT.carbon, sx * 0.79, 0.085, 0);
+    addPart(car, new THREE.BoxGeometry(0.16, 0.012, 0.22), black, sx * 0.99, 0.27, ZF - 0.2, 0, sx * 0.25, sx * 0.25);   // dive planes
+    addPart(car, new THREE.BoxGeometry(0.14, 0.012, 0.18), black, sx * 0.99, 0.36, ZF - 0.3, 0, sx * 0.25, sx * 0.25);
   }
+  addPart(car, taperedBox(1.5, 0.3, 1.5, 0.04, 0.55), black, 0, 0.07, ZR + 0.22);
+  for (let k = -3; k <= 3; k++) addPart(car, new THREE.BoxGeometry(0.012, 0.28, 0.5), black, k * 0.22, 0.08, ZR + 0.2);
+  addPart(car, new THREE.BoxGeometry(0.34, 0.2, 0.3), black, 0, 0.42, ZR + 0.1);              // crash structure
+  addPart(car, new THREE.BoxGeometry(0.14, 0.05, 0.02), MAT.tail, 0, 0.45, ZR - 0.06);        // rain light
 
-  // Splitter, skirts, diffuser, dive planes
-  addPart(car, new THREE.BoxGeometry(1.9, 0.03, 0.42), matteBlack, 0, 0.09, 2.32);
+  // headlights: a slim LED bar on each nose corner with the four-point cluster at its inboard end
   for (const sx of [-1, 1]) {
-    addPart(car, new THREE.BoxGeometry(0.08, 0.2, 2.3), matteBlack, sx * 0.97, 0.2, 0);
-    addPart(car, new THREE.BoxGeometry(0.22, 0.02, 0.18), matteBlack, sx * 0.85, 0.32, 2.3, 0, 0, sx * 0.2);
-    addPart(car, new THREE.BoxGeometry(0.12, 0.06, 0.09), red, sx * 0.98, 0.84, 0.95);   // mirrors
+    const x = sx * 0.7, z = ZF - 0.07, n = surfaceNormal(x, z);
+    const unit = new THREE.Group();
+    unit.position.set(x, surfaceY(x, z) + 0.003, z);
+    unit.quaternion.setFromUnitVectors(UP, n);
+    addPart(unit, new THREE.BoxGeometry(0.46, 0.012, 0.11), black);
+    addPart(unit, new THREE.BoxGeometry(0.36, 0.016, 0.034), lamp, sx * 0.03, 0, -0.02);
+    for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      addPart(unit, new THREE.BoxGeometry(0.03, 0.018, 0.022), lamp, -sx * 0.17 + dx * 0.022, 0, 0.024 + dz * 0.015);
+    }
+    car.add(unit);
   }
-  addPart(car, new THREE.BoxGeometry(1.7, 0.26, 0.32), matteBlack, 0, 0.2, -2.42);
-  for (let k = -2; k <= 2; k++) addPart(car, new THREE.BoxGeometry(0.02, 0.24, 0.35), matteBlack, k * 0.3, 0.2, -2.55);
+  // full-width LED tail bar across the top of the rear
+  addPart(car, new THREE.BoxGeometry(1.7, 0.028, 0.02), MAT.tail, 0, 0.57, ZR - 0.005);
 
-  // Lights
-  for (const sx of [-1, 1]) addPart(car, new THREE.BoxGeometry(0.36, 0.05, 0.08), MAT.head, sx * 0.6, 0.42, 2.12, -0.55);
-  addPart(car, new THREE.BoxGeometry(1.7, 0.04, 0.04), MAT.tail, 0, 0.72, -2.53);
+  // mirrors on stalks on the fender crowns, either side of the windscreen
+  for (const sx of [-1, 1]) {
+    const x = sx * 0.66, z = 1.0, y = surfaceY(x, z);
+    const pod = addPart(car, new THREE.SphereGeometry(1, 16, 10), black, x + sx * 0.02, y + 0.075, z);
+    pod.scale.set(0.075, 0.032, 0.07);
+    addPart(car, new THREE.PlaneGeometry(0.13, 0.05), mirrorGlass, x + sx * 0.02, y + 0.075, z - 0.035, 0, Math.PI);
+    addPart(car, new THREE.BoxGeometry(0.012, 0.07, 0.05), black, x + sx * 0.02, y + 0.03, z + 0.01);
+  }
 
-  // Roof scoop + door numbers
-  addPart(car, taperedBox(0.2, 0.05, 0.3, 0.16, 0.7), matteBlack, 0, 0.92, -0.35);
-  addNumber(car, number, 0.936, 0.44, -0.3, 0.5, 0.28);
+  // roof scoop and radio antenna
+  addPart(car, taperedBox(0.22, 0.04, 0.24, 0.11, 0.42), black, 0, surfaceY(0, -0.2) - 0.03, -0.2);
+  addPart(car, new THREE.BoxGeometry(0.2, 0.07, 0.01), new THREE.MeshStandardMaterial({ color: 0x020202, roughness: 1 }), 0, surfaceY(0, 0.0) + 0.03, 0.005);
+  strut(car, new THREE.Vector3(0, surfaceY(0, 0.35), 0.35), new THREE.Vector3(0, surfaceY(0, 0.35) + 0.32, 0.31), 0.004, black);
 
-  // Wheels
+  // shark fin from the roof to the wing, race number on both faces
+  addPart(car, sideExtrude([[-0.35, 0.99], [-2.32, 1.1], [-2.44, 1.06], [-2.44, 0.6], [-1.2, 0.8], [-0.5, 0.9]], 0.022), black);
+  const numMat = new THREE.MeshStandardMaterial({ map: boardTexture(String(number), '#0b0b0d', '#f4f4f4', 256), roughness: 0.5, transparent: false });
+  for (const sx of [-1, 1]) addPart(car, new THREE.PlaneGeometry(0.46, 0.23), numMat, sx * 0.0125, 0.94, -1.55, 0, sx * Math.PI / 2);
+
+  // rear wing: main plane + flap between tall endplates, on two pylons
+  addPart(car, aerofoil(0.36, 0.11, 1.84), black, 0, 1.0, -2.3, 0.1);
+  addPart(car, aerofoil(0.18, 0.09, 1.84, 0.03), black, 0, 1.08, -2.5, 0.55);
+  for (const sx of [-1, 1]) {
+    addPart(car, sideExtrude([[-2.04, 0.96], [-2.04, 1.1], [-2.62, 1.17], [-2.66, 0.66], [-2.3, 0.6], [-2.1, 0.75]], 0.018, sx * 0.93), black);
+    strut(car, new THREE.Vector3(sx * 0.24, 0.6, -2.28), new THREE.Vector3(sx * 0.24, 0.98, -2.34), 0.018, black);
+  }
+
+  // wheels: black ten-spoke rims, wider rears
+  const style = { rim: MAT.rimDark, spoke: MAT.spokeDark, spokes: 5 };
   const wheels = [];
-  for (const z of [WB, -WB]) {
+  for (const [z, w] of [[WB, 0.29], [-WB, 0.34]]) {
     for (const sx of [-1, 1]) {
-      const wh = createWheel(R, 0.38, color);
-      wh.group.position.set(sx * 0.82, R, z);
+      const wh = createWheel(R, w, 0x7d838b, style);
+      wh.group.position.set(sx * (0.98 - w / 2), R, z);
       car.add(wh.group);
       wheels.push(wh);
     }
@@ -859,8 +1080,8 @@ function createHypercar(color, number) {
   car.userData = {
     wheels,
     dustPoints: [new THREE.Vector3(-0.85, 0.12, -2.2), new THREE.Vector3(0.85, 0.12, -2.2)],
-    vortexPoints: [new THREE.Vector3(-0.99, 1.2, -2.65), new THREE.Vector3(0.99, 1.2, -2.65)],
-    onboard: new THREE.Vector3(0, 1.14, 0.3)     // roof cam: canopy, bonnet and front arches in view
+    vortexPoints: [new THREE.Vector3(-0.94, 1.14, -2.65), new THREE.Vector3(0.94, 1.14, -2.65)],
+    onboard: new THREE.Vector3(0, 1.16, 0.32)     // roof cam: canopy, bonnet and fender crowns in view
   };
   return splitBody(car);
 }
@@ -1071,8 +1292,8 @@ function speedProfile(c) {
 const racers = [
   { name: 'F-Style Open Wheel #1', css: '#1fe0ff,#0a2bb8', car: createOpenWheelCar(0x1fe0ff, 0x0a2bb8, 1), spec: OW },
   { name: 'F-Style Open Wheel #4', css: '#ffc233,#d93a0b', car: createOpenWheelCar(0xffc233, 0xd93a0b, 4), spec: { ...OW, mu: OW.mu * 0.97 } },
-  { name: 'LM-Style Hypercar #7',  css: '#b5121b,#111',    car: createHypercar(0xb5121b, 7), spec: HC },
-  { name: 'LM-Style Hypercar #8',  css: '#0e7a4a,#111',    car: createHypercar(0x0e7a4a, 8), spec: { ...HC, mu: HC.mu * 0.97 } }
+  { name: 'LMDh Hypercar #7',      css: '#f2f2f2,#d5001c', car: createHypercar(0xd5001c, 7), spec: HC },
+  { name: 'LMDh Hypercar #8',      css: '#f2f2f2,#0e7a4a', car: createHypercar(0x0e7a4a, 8), spec: { ...HC, mu: HC.mu * 0.97 } }
 ];
 let target = racers[0];   // the car the chase / onboard / orbit cameras follow
 const carsEl = document.querySelector('.cars');
