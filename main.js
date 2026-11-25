@@ -1457,10 +1457,10 @@ function speedProfile(c) {
 }
 
 const racers = [
-  { name: 'W10-Style F1 #44',      css: '#9aa0a6,#00d2be', car: createOpenWheelCar(44, 0x111111), spec: OW },
-  { name: 'W10-Style F1 #77',      css: '#9aa0a6,#ffd400', car: createOpenWheelCar(77, 0xffd400), spec: { ...OW, mu: OW.mu * 0.97 } },
-  { name: 'LMDh Hypercar #7',      css: '#f2f2f2,#d5001c', car: createHypercar(0xd5001c, 7), spec: HC },
-  { name: 'LMDh Hypercar #8',      css: '#f2f2f2,#0e7a4a', car: createHypercar(0x0e7a4a, 8), spec: { ...HC, mu: HC.mu * 0.97 } }
+  { name: 'W10-Style F1 #44',      css: '#9aa0a6,#00d2be', car: createOpenWheelCar(44, 0x111111), spec: OW, engine: 'f1' },
+  { name: 'W10-Style F1 #77',      css: '#9aa0a6,#ffd400', car: createOpenWheelCar(77, 0xffd400), spec: { ...OW, mu: OW.mu * 0.97 }, engine: 'f1' },
+  { name: 'LMDh Hypercar #7',      css: '#f2f2f2,#d5001c', car: createHypercar(0xd5001c, 7), spec: HC, engine: 'hc' },
+  { name: 'LMDh Hypercar #8',      css: '#f2f2f2,#0e7a4a', car: createHypercar(0x0e7a4a, 8), spec: { ...HC, mu: HC.mu * 0.97 }, engine: 'hc' }
 ];
 let target = racers[0];   // the car the chase / onboard / orbit cameras follow
 const carsEl = document.querySelector('.cars');
@@ -1662,7 +1662,197 @@ document.getElementById('sceneStart').addEventListener('click', startRace);
 document.getElementById('sceneOvertake').addEventListener('click', startOvertake);
 
 /* =====================================================================
-   12. ANIMATION LOOP
+   12. SOUND (Web Audio: synthesised engines, positional, with Doppler)
+   ===================================================================== */
+// Every engine note is built live from its car's speed and throttle, so nothing is downloaded. Browsers only let
+// audio start after a click or key press, so the context is created on the first gesture anywhere on the page.
+// gears: top speed (m/s) in each gear at the rev limit
+const ENGINES = {
+  f1: { cyl: 6, idle: 4500, max: 12000, gears: [31, 41, 50, 58, 66, 74, 82, 92], drive: 2.4, bright: 6500, sub: 0.18, turbo: 0.035, level: 0.32 },
+  hc: { cyl: 8, idle: 2600, max: 8800, gears: [26, 36, 46, 57, 68, 80, 96], drive: 3.2, bright: 3200, sub: 0.55, turbo: 0.015, level: 0.38 }
+};
+const sound = {
+  ctx: null, voices: [], wind: null,
+  volume: clamp(Number(localStorage.getItem('raceVolume') ?? 0.5), 0, 1),
+  muted: localStorage.getItem('raceMuted') === '1'
+};
+// built here rather than in index.html, so a cached page can never be out of step with this script
+document.getElementById('controls').insertAdjacentHTML('beforeend',
+  '<span class="sep"></span><label title="Suara mulai setelah klik pertama di halaman">Volume ' +
+  '<input id="volume" type="range" min="0" max="1" step="0.01"></label><button id="mute">Suara</button>');
+const volumeEl = document.getElementById('volume'), muteBtn = document.getElementById('mute');
+volumeEl.value = sound.volume;
+
+// Slider is perceptual (gain = value^2); mute and pause fade rather than click
+function applyVolume() {
+  muteBtn.textContent = sound.muted ? 'Senyap' : 'Suara';
+  muteBtn.classList.toggle('active', sound.muted);
+  if (!sound.ctx) return;
+  const t = sound.ctx.currentTime;
+  sound.master.gain.setTargetAtTime(sound.muted ? 0 : sound.volume ** 2, t, 0.05);
+  sound.pause.gain.setTargetAtTime(state.paused ? 0 : 1, t, 0.08);
+}
+volumeEl.addEventListener('input', () => { sound.volume = Number(volumeEl.value); localStorage.setItem('raceVolume', sound.volume); applyVolume(); });
+muteBtn.addEventListener('click', () => { sound.muted = !sound.muted; localStorage.setItem('raceMuted', sound.muted ? '1' : '0'); applyVolume(); });
+
+function noiseBuffer(ctx) {
+  const b = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  return b;
+}
+
+// One engine: two slightly detuned saws on the firing frequency + a sub-octave square, exhaust noise, all driven
+// through a soft clipper and a throttle-controlled low-pass; a turbo whine on top; a panner places it on the car.
+function createEngineVoice(ctx, out, noise, cfg) {
+  const v = { cfg, gear: 1, rpm: cfg.idle, thr: 0, cut: 0, dist: null, dop: 1 };
+  const osc = (type, gain, dest) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; g.gain.value = gain; o.connect(g).connect(dest); o.start();
+    return o;
+  };
+  const mix = ctx.createGain();
+  v.o1 = osc('sawtooth', 0.5, mix);
+  v.o2 = osc('sawtooth', 0.32, mix);
+  v.o3 = osc('square', cfg.sub, mix);
+  const nz = ctx.createBufferSource();
+  nz.buffer = noise; nz.loop = true; nz.start(0, Math.random() * 1.9);
+  v.nBand = Object.assign(ctx.createBiquadFilter(), { type: 'bandpass' }); v.nBand.Q.value = 0.9;
+  v.nGain = ctx.createGain(); v.nGain.gain.value = 0;
+  nz.connect(v.nBand).connect(v.nGain).connect(mix);
+
+  const shaper = ctx.createWaveShaper(), curve = new Float32Array(1024);
+  for (let i = 0; i < curve.length; i++) curve[i] = Math.tanh(cfg.drive * (i / 511.5 - 1)) / Math.tanh(cfg.drive);
+  shaper.curve = curve;
+  v.lp = Object.assign(ctx.createBiquadFilter(), { type: 'lowpass' }); v.lp.Q.value = 0.8;
+  v.amp = ctx.createGain(); v.amp.gain.value = 0;
+  v.panner = new PannerNode(ctx, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 5, rolloffFactor: 1.3, maxDistance: 4000 });
+  mix.connect(shaper).connect(v.lp).connect(v.amp).connect(v.panner).connect(out);
+  v.turboGain = ctx.createGain(); v.turboGain.gain.value = 0;
+  v.turbo = osc('sine', 1, v.turboGain);
+  v.turboGain.connect(v.panner);
+  return v;
+}
+
+function initSound() {
+  if (sound.ctx) { if (sound.ctx.state === 'suspended' && !document.hidden) sound.ctx.resume(); return; }
+  const ctx = sound.ctx = new AudioContext();
+  // master volume -> limiter, so four engines at once never clip
+  sound.master = ctx.createGain(); sound.master.gain.value = 0;
+  const limiter = new DynamicsCompressorNode(ctx, { threshold: -18, knee: 12, ratio: 6, attack: 0.005, release: 0.25 });
+  sound.master.connect(limiter).connect(ctx.destination);
+  sound.pause = ctx.createGain();
+  sound.pause.connect(sound.master);
+  const noise = noiseBuffer(ctx);
+  sound.voices = racers.map(r => createEngineVoice(ctx, sound.pause, noise, ENGINES[r.engine]));
+  // cockpit wind for the onboard camera
+  const wn = ctx.createBufferSource(); wn.buffer = noise; wn.loop = true; wn.start();
+  const wf = Object.assign(ctx.createBiquadFilter(), { type: 'bandpass' }); wf.frequency.value = 650; wf.Q.value = 0.5;
+  sound.wind = ctx.createGain(); sound.wind.gain.value = 0;
+  wn.connect(wf).connect(sound.wind).connect(sound.pause);
+  // recorded pass-by (relative path, so it also loads on GitHub Pages); the race just stays without it if it fails
+  fetch('flyby.mp3').then(res => res.arrayBuffer()).then(b => ctx.decodeAudioData(b)).then(buf => { sound.flyby = buf; }).catch(() => {});
+  applyVolume();
+}
+
+// The recording peaks FLYBY_PEAK s in, so it starts that long before the car's closest approach to the camera
+const FLYBY_PEAK = 1.45;
+function playFlyby(v, closest, speed) {
+  const ctx = sound.ctx, src = ctx.createBufferSource(), g = ctx.createGain();
+  src.buffer = sound.flyby;
+  src.playbackRate.value = clamp(state.speedFactor, 0.5, 2);   // slow motion stretches it with the cars
+  g.gain.value = 0.5 * clamp(7 / Math.max(closest, 3), 0.25, 1) * clamp(speed / 60, 0.4, 1);   // nearer and faster = louder
+  v.flyPan = new StereoPannerNode(ctx);
+  src.connect(g).connect(v.flyPan).connect(sound.pause);
+  src.onended = () => { v.flyPan = null; };
+  src.start();
+  v.flyCool = 5;
+}
+
+// AudioListener position/orientation as AudioParams where supported (Chrome, Safari), the old setters otherwise (Firefox)
+function placeListener(L, p, f, u, now) {
+  if (L.positionX) {
+    for (const [k, val] of [['positionX', p.x], ['positionY', p.y], ['positionZ', p.z], ['forwardX', f.x], ['forwardY', f.y],
+      ['forwardZ', f.z], ['upX', u.x], ['upY', u.y], ['upZ', u.z]]) L[k].setTargetAtTime(val, now, 0.01);
+  } else {
+    L.setPosition(p.x, p.y, p.z);
+    L.setOrientation(f.x, f.y, f.z, u.x, u.y, u.z);
+  }
+}
+window.addEventListener('pointerdown', initSound);
+window.addEventListener('keydown', initSound);
+document.addEventListener('visibilitychange', () => {   // no droning tone from a background tab
+  if (sound.ctx) document.hidden ? sound.ctx.suspend() : sound.ctx.resume();
+});
+
+const _fwd = new THREE.Vector3(), _up = new THREE.Vector3(), _right = new THREE.Vector3();
+const _camPrev = new THREE.Vector3(), _camVel = new THREE.Vector3(), _rel = new THREE.Vector3(), _vel = new THREE.Vector3(), _to = new THREE.Vector3();
+function updateSound(dt) {
+  if (!sound.ctx || dt <= 0) return;
+  const ctx = sound.ctx, now = ctx.currentTime, cam = camera.position;
+  _fwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  _up.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  _right.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  placeListener(ctx.listener, cam, _fwd, _up, now);
+  const set = (p, v, tc = 0.03) => p.setTargetAtTime(v, now, tc);
+  _camVel.copy(cam).sub(_camPrev).divideScalar(dt);
+  const camJump = _camPrev.lengthSq() === 0 || _camVel.length() > 150;   // camera cut: no velocities this frame
+  _camPrev.copy(cam);
+  // fly-bys only for a camera standing still (low-angle, aerial, a parked orbit), and not while it settles after a cut
+  sound.camStill = camJump || _camVel.length() > 6 ? 0 : (sound.camStill ?? 0) + dt;
+
+  racers.forEach((r, i) => {
+    const v = sound.voices[i], c = v.cfg, launched = state.raceT >= r.launch, gs = c.gears;
+    // throttle: revving on the grid while the lights come on, then flat out / lifting / braking
+    const want = !launched
+      ? (state.raceT > r.launch - 4.5 ? 0.45 + 0.4 * Math.sin(state.raceT * 7 + i * 1.7) ** 2 : 0.05)
+      : r.aLong > 0.3 ? 1 : r.aLong < -1.5 ? 0 : 0.4;
+    v.thr += (want - v.thr) * (1 - Math.exp(-12 * dt));
+    // gearbox: upshift at the limiter (a short ignition cut), downshift when the lower gear has room
+    if (!launched) v.gear = 1;
+    while (launched && v.gear < gs.length && r.speed > 0.97 * gs[v.gear - 1]) { v.gear++; v.cut = 0.07; }
+    while (v.gear > 1 && r.speed < 0.84 * gs[v.gear - 2]) { v.gear--; v.cut = 0.04; }
+    v.cut = Math.max(0, v.cut - dt);
+    const clutch = c.idle + (0.8 * c.max - c.idle) * v.thr;   // slipping clutch on the grid and off the line
+    const rpm = Math.max(c.idle, c.max * r.speed / gs[v.gear - 1], v.gear === 1 ? clutch : 0);
+    v.rpm += (Math.min(rpm, c.max) - v.rpm) * (1 - Math.exp(-25 * dt));
+
+    // Doppler from how fast the car closes on the listener
+    const d = r.car.position.distanceTo(cam);
+    let closing = v.dist === null || camJump ? 0 : (v.dist - d) / dt;
+    if (Math.abs(closing) > 150) closing = 0;   // a scene restart teleported the car
+    v.dist = d;
+    v.dop += (clamp(343 / (343 - clamp(closing, -150, 150)), 0.7, 1.5) - v.dop) * (1 - Math.exp(-10 * dt));
+
+    const f = v.rpm / 60 * c.cyl / 2 * v.dop, load = v.rpm / c.max;
+    set(v.o1.frequency, f, 0.015); set(v.o2.frequency, f * 1.007, 0.015); set(v.o3.frequency, f / 2, 0.015);
+    set(v.nBand.frequency, f * 1.5, 0.02);
+    set(v.nGain.gain, 0.15 + 0.35 * v.thr);
+    set(v.lp.frequency, 250 + c.bright * (0.25 + 0.75 * v.thr) * load);
+    set(v.amp.gain, c.level * (0.4 + 0.6 * v.thr) * (v.cut > 0 ? 0.3 : 1) * (v.flyPan ? 0.6 : 1), 0.02);
+    set(v.turbo.frequency, (1800 + 5200 * load) * v.dop);
+    set(v.turboGain.gain, c.turbo * v.thr * load);
+    const p = r.car.position;
+    set(v.panner.positionX, p.x, 0.01); set(v.panner.positionY, p.y + 0.5, 0.01); set(v.panner.positionZ, p.z, 0.01);
+
+    // fly-by: predict the closest approach from the car's velocity relative to the camera
+    v.prevPos ??= p.clone();
+    _vel.copy(p).sub(v.prevPos).divideScalar(dt);
+    v.prevPos.copy(p);
+    v.flyCool = Math.max(0, (v.flyCool ?? 0) - dt);
+    _rel.copy(_vel).sub(_camVel);
+    _to.copy(p).sub(cam);
+    const sp = _rel.length();
+    if (sound.flyby && sound.camStill > 0.6 && !v.flyPan && v.flyCool === 0 && sp > 18 && sp < 150) {
+      const tMin = -_to.dot(_rel) / (sp * sp), closest = _to.clone().addScaledVector(_rel, tMin).length();
+      if (tMin > FLYBY_PEAK - 0.1 && tMin < FLYBY_PEAK + 0.1 && closest < 14) playFlyby(v, closest, sp);
+    }
+    if (v.flyPan) set(v.flyPan.pan, clamp(_to.normalize().dot(_right), -0.9, 0.9), 0.05);
+  });
+  set(sound.wind.gain, cameraMode === 'onboard' ? 0.12 * Math.min(1, target.speed / 85) ** 2 : 0, 0.2);
+}
+
+/* =====================================================================
+   13. ANIMATION LOOP
    ===================================================================== */
 const tagEl = document.querySelector('#hud .tag');
 document.getElementById('speed').addEventListener('input', e => state.speedFactor = parseFloat(e.target.value));
@@ -1671,7 +1861,9 @@ pauseBtn.addEventListener('click', () => {
   state.paused = !state.paused;
   pauseBtn.textContent = state.paused ? 'Lanjut' : 'Jeda';
   pauseBtn.classList.toggle('active', state.paused);
+  applyVolume();   // engines fade out while paused
 });
+applyVolume();
 let hudTimer = 0;
 
 function animate() {
@@ -1711,6 +1903,7 @@ function animate() {
 
   if (controls.enabled) controls.update();
   sky.position.copy(camera.position);
+  updateSound(dt);
 
   hudTimer += dt;
   if (hudTimer > 0.15) {
