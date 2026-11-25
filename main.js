@@ -650,16 +650,17 @@ function strut(group, a, b, r, mat) {
   return m;
 }
 
-// style: { rim, spoke, spokes } overrides the rim/spoke materials and the spoke-pair count
+// style: { rim, spoke, spokes, rimFrac } overrides the rim/spoke materials and the spoke-pair count
 function createWheel(r, w, accentColor, style = {}) {
   const group = new THREE.Group();
   const spin = new THREE.Group();
   group.add(spin);
   const pairs = style.spokes ?? 5;
   addPart(spin, new THREE.CylinderGeometry(r, r, w, 48).rotateZ(Math.PI / 2), MAT.tire);
-  addPart(spin, new THREE.CylinderGeometry(r * 0.64, r * 0.64, w + 0.012, 36).rotateZ(Math.PI / 2), style.rim ?? MAT.rim);
+  const rf = style.rimFrac ?? 0.64;   // rim radius as a share of the tyre radius
+  addPart(spin, new THREE.CylinderGeometry(r * rf, r * rf, w + 0.012, 36).rotateZ(Math.PI / 2), style.rim ?? MAT.rim);
   for (let k = 0; k < pairs; k++) {
-    addPart(spin, new THREE.BoxGeometry(w + 0.024, 0.045 * 5 / pairs + 0.012, r * 1.2), style.spoke ?? MAT.spoke, 0, 0, 0, k * Math.PI / pairs);
+    addPart(spin, new THREE.BoxGeometry(w + 0.024, 0.045 * 5 / pairs + 0.012, r * rf * 1.875), style.spoke ?? MAT.spoke, 0, 0, 0, k * Math.PI / pairs);
   }
   const ringMat = new THREE.MeshStandardMaterial({ color: accentColor, roughness: 0.5 });
   addPart(spin, new THREE.CylinderGeometry(0.04, 0.04, w + 0.05, 6).rotateZ(Math.PI / 2), ringMat);   // centre-lock nut
@@ -675,20 +676,6 @@ function addNumber(car, n, x, y, z, w, h) {
   for (const sx of [-1, 1]) addPart(car, new THREE.PlaneGeometry(w, h), mat, sx * x, y, z, 0, sx * Math.PI / 2);
 }
 
-// Bake a front-to-back colour gradient (darker low down) into vertex colours
-function paintGradient(mesh, front, back, zFront, zBack) {
-  const g = mesh.geometry, p = g.attributes.position;
-  const cf = new THREE.Color(front), cb = new THREE.Color(back), c = new THREE.Color();
-  const colors = new Float32Array(p.count * 3);
-  for (let i = 0; i < p.count; i++) {
-    const z = p.getZ(i) + mesh.position.z, y = p.getY(i) + mesh.position.y;
-    c.copy(cb).lerp(cf, smoothstep(zBack, zFront, z));
-    c.multiplyScalar(0.5 + 0.5 * smoothstep(0.1, 0.65, y));
-    colors.set([c.r, c.g, c.b], i * 3);
-  }
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-}
-
 // Everything except the wheels moves into a "body" group so it can roll, pitch and heave on its suspension
 function splitBody(car) {
   const ud = car.userData, body = new THREE.Group();
@@ -699,79 +686,273 @@ function splitBody(car) {
   return car;
 }
 
-/* ---------- 7a. F-Style Open Wheel Racer ---------- */
-function createOpenWheelCar(front, back, number) {
-  const car = new THREE.Group();
-  const body = new THREE.MeshPhysicalMaterial({
-    color: 0xffffff, vertexColors: true, metalness: 0.75, roughness: 0.26, clearcoat: 1, clearcoatRoughness: 0.06
-  });
-  const cyan = new THREE.MeshPhysicalMaterial({ color: front, metalness: 0.6, roughness: 0.3, clearcoat: 1 });
+// Physical paint whose colour, roughness, metalness and clearcoat come from a GLSL livery(col, rough, metal, coat)
+// function of the body-space position vLp and normal vLn. Uniforms: numbers become floats, THREE.Colors vec3s.
+// `zone` adds the per-vertex vZone attribute.
+function proceduralPaint(glsl, uniforms, { zone = false, side = THREE.FrontSide } = {}) {
+  const m = new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.05, side });
+  const decl = Object.entries(uniforms).map(([k, v]) => `uniform ${v.isColor ? 'vec3' : 'float'} ${k};`).join('\n');
+  const vary = `varying vec3 vLp;\nvarying vec3 vLn;\n${zone ? 'varying float vZone;' : ''}`;
+  m.onBeforeCompile = sh => {
+    for (const [k, v] of Object.entries(uniforms)) sh.uniforms[k] = { value: v };
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', `#include <common>\n${zone ? 'attribute float zone;' : ''}\n${vary}`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\nvLp = position; vLn = normal;${zone ? ' vZone = zone;' : ''}`);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', `#include <common>\n${decl}\n${vary}\n${glsl}`)
+      .replace('vec4 diffuseColor = vec4( diffuse, opacity );',
+        'vec3 lvCol; float lvRough, lvMetal, lvCoat;\nlivery(lvCol, lvRough, lvMetal, lvCoat);\nvec4 diffuseColor = vec4( lvCol, opacity );')
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = lvRough;')
+      .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor = lvMetal;')
+      .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\n#ifdef USE_CLEARCOAT\nmaterial.clearcoat *= lvCoat;\n#endif');
+  };
+  m.customProgramCacheKey = () => glsl;
+  return m;
+}
 
-  // floor & diffuser
-  addPart(car, new THREE.BoxGeometry(1.5, 0.04, 3.6), MAT.carbon, 0, 0.08, -0.2);
-  addPart(car, taperedBox(1.0, 0.24, 1.0, 0.04, 0.45), MAT.carbon, 0, 0.08, -2.15);
-
-  // nose, tub, sidepods, engine cover, airbox
-  addPart(car, taperedBox(0.42, 0.32, 0.18, 0.14, 1.5), body, 0, 0.18, 1.95);
-  addPart(car, taperedBox(0.72, 0.55, 0.5, 0.4, 1.4), body, 0, 0.12, 0.55);
-  for (const sx of [-1, 1]) {
-    addPart(car, taperedBox(0.36, 0.22, 0.48, 0.42, 1.7), body, sx * 0.56, 0.12, -0.25);
-    addPart(car, new THREE.BoxGeometry(0.4, 0.3, 0.04), MAT.carbon, sx * 0.56, 0.32, 0.61);  // inlet
-    addPart(car, new THREE.BoxGeometry(0.1, 0.03, 0.32), body, sx * 0.4, 0.67, 0.78);       // mirror
+// Skin through closed rings of Vector3 (equal point counts), faces pointing away from each ring's centre;
+// the two end rings are capped flat.
+function loftGeometry(rings) {
+  const P = rings[0].length, pos = [], idx = [];
+  const centre = r => r.reduce((c, v) => c.add(v), new THREE.Vector3()).divideScalar(r.length);
+  for (const ring of rings) for (const v of ring) pos.push(v.x, v.y, v.z);
+  // winding from a well-formed quad in the middle
+  const m = Math.floor(rings.length / 2), r0 = rings[m], r1 = rings[m + 1], c0 = centre(r0);
+  let j0 = 0;
+  r0.forEach((v, j) => { if (v.distanceTo(c0) > r0[j0].distanceTo(c0)) j0 = j; });
+  const e1 = r0[(j0 + 1) % P].clone().sub(r0[j0]), e2 = r1[j0].clone().sub(r0[j0]);
+  const flip = e1.cross(e2).dot(r0[j0].clone().sub(c0)) < 0;
+  for (let i = 0; i < rings.length - 1; i++) {
+    for (let j = 0; j < P; j++) {
+      const a = i * P + j, b = i * P + (j + 1) % P, c = a + P, d = b + P;
+      idx.push(...(flip ? [a, c, b, b, c, d] : [a, b, c, b, d, c]));
+    }
   }
-  addPart(car, taperedBox(0.22, 0.3, 0.62, 0.6, 2.0), body, 0, 0.12, -1.05);
-  addPart(car, taperedBox(0.3, 0.26, 0.3, 0.34, 0.55), body, 0, 0.68, -0.3);
-  addPart(car, new THREE.BoxGeometry(0.2, 0.16, 0.04), MAT.carbon, 0, 0.88, -0.02);         // airbox intake
+  for (const [end, next] of [[rings[0], rings[1]], [rings[rings.length - 1], rings[rings.length - 2]]]) {
+    const axis = centre(end).sub(centre(next)).normalize();
+    const u = new THREE.Vector3().crossVectors(axis, Math.abs(axis.y) < 0.9 ? UP : new THREE.Vector3(1, 0, 0)).normalize();
+    const v = new THREE.Vector3().crossVectors(axis, u);
+    const base = pos.length / 3;
+    for (const p of end) pos.push(p.x, p.y, p.z);
+    for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(end.map(p => new THREE.Vector2(p.dot(u), p.dot(v))), [])) {
+      const n = end[b].clone().sub(end[a]).cross(end[c].clone().sub(end[a]));
+      idx.push(...(n.dot(axis) > 0 ? [a, b, c] : [a, c, b]).map(k => k + base));
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
 
-  // cockpit opening + driver helmet
-  addPart(car, new THREE.BoxGeometry(0.42, 0.04, 0.7), MAT.carbon, 0, 0.655, 0.3);
-  addPart(car, new THREE.SphereGeometry(0.14, 20, 14), new THREE.MeshPhysicalMaterial({ color: 0xf4f6f8, clearcoat: 1, roughness: 0.2 }), 0, 0.74, 0.18);
-  addPart(car, new THREE.SphereGeometry(0.142, 20, 8, Math.PI / 2 - 0.8, 1.6, 1.2, 0.45), MAT.glass, 0, 0.74, 0.18); // visor
+// Mirror a geometry to the other side of the car (x -> -x) keeping its faces outward
+function mirrorX(geo) {
+  const g = geo.clone().scale(-1, 1, 1), ix = g.index.array;
+  for (let i = 0; i < ix.length; i += 3) [ix[i + 1], ix[i + 2]] = [ix[i + 2], ix[i + 1]];
+  g.computeVertexNormals();
+  return g;
+}
 
-  // halo
-  addPart(car, new THREE.TorusGeometry(0.36, 0.035, 8, 28, Math.PI).rotateX(Math.PI / 2), MAT.carbon, 0, 0.88, 0.15);
-  for (const sx of [-1, 1]) strut(car, new THREE.Vector3(sx * 0.36, 0.64, 0.15), new THREE.Vector3(sx * 0.36, 0.88, 0.15), 0.03, MAT.carbon);
-  strut(car, new THREE.Vector3(0, 0.56, 0.85), new THREE.Vector3(0, 0.88, 0.51), 0.032, MAT.carbon);
+// Superellipse ring in the x-y plane at z: half-width w about xc, from bottom b to top t.
+// taper narrows the top (1 = a point), under narrows the bottom; shapeY(x, y) can carve the result.
+function superRing(z, { xc = 0, w, b, t, p = 2.5, taper = 0, under = 0, shapeY = null }, n = 48) {
+  const ring = [], yc = (t + b) / 2, hh = (t - b) / 2;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+    const u = Math.sign(c) * Math.abs(c) ** (2 / p), v = Math.sign(s) * Math.abs(s) ** (2 / p);
+    const x = xc + w * u * (1 - taper * (v + 1) / 2 - under * (1 - v) / 2);
+    const y = yc + hh * v;
+    ring.push(new THREE.Vector3(x, shapeY ? shapeY(x, y, v) : y, z));
+  }
+  return ring;
+}
 
-  // front wing (main plane + flap + endplates)
-  addPart(car, new THREE.BoxGeometry(1.85, 0.035, 0.42), MAT.carbon, 0, 0.1, 2.62);
-  addPart(car, new THREE.BoxGeometry(1.7, 0.03, 0.26), cyan, 0, 0.18, 2.5, -0.28);
-  for (const sx of [-1, 1]) addPart(car, new THREE.BoxGeometry(0.03, 0.22, 0.62), MAT.carbon, sx * 0.93, 0.18, 2.56);
+/* ---------- 7a. F1 Car (2019 rules, shape and livery after the Mercedes W10) ---------- */
+// Real dimensions: 3.72 m wheelbase, ~5.5 m long, 2.0 m wide, 13" rims on 0.66 m tyres (305 front / 405 rear),
+// 2.0 m wide simplified front wing, 1.05 m rear wing. Silver over black with teal accents, no sponsors or logos.
+const F1_LIVERY_GLSL = /* glsl */`
+  void livery(out vec3 col, out float rough, out float metal, out float coat) {
+    vec3 p = vLp, n = normalize(vLn);
+    float ax = abs(p.x);
+    col = vec3(0.6, 0.62, 0.64); rough = 0.24; metal = 0.85; coat = 1.0;
+    bool blk = false, teal = false;
+    if (uPart < 0.5) {                                                   // nose, tub, engine cover, sidepods
+      float line = p.z > 1.85 ? 0.21 : p.z > 0.85 ? mix(0.3, 0.21, (p.z - 0.85)) : mix(0.3, 0.42, smoothstep(-1.4, 0.4, p.z));
+      blk = p.y < line || n.y < -0.4 || p.z < -1.75;
+      teal = !blk && p.y < line + 0.03 && p.z < 0.75 && p.z > -1.6;    // pin line along the silver / black split
+      blk = blk || (ax < 0.2 && p.z > -0.13 && p.z < 0.72 && p.y > 0.5 && n.y > 0.2 && p.y < 0.645);   // cockpit
+      blk = blk || (n.z > 0.45 && p.y > 0.69 && p.z < -0.1 && p.z > -0.4);                            // airbox mouth
+      blk = blk || (n.z > 0.8 && ax > 0.3);                                                            // sidepod inlets
+      teal = teal && !blk;
+    } else {                                                             // front wing
+      blk = ax > 0.9 || n.y < -0.5;
+      teal = !blk && abs(ax - 0.805) < 0.016;
+    }
+    if (teal) { col = uAccent; rough = 0.22; metal = 0.25; }
+    if (blk) { col = vec3(0.012); rough = 0.45; metal = 0.3; coat = 0.35; }
+  }`;
 
-  // rear wing, beam wing, pillar, rain light
-  addPart(car, new THREE.BoxGeometry(1.05, 0.04, 0.42), MAT.carbon, 0, 0.94, -2.2);
-  addPart(car, new THREE.BoxGeometry(1.05, 0.03, 0.26), cyan, 0, 1.07, -2.34, 0.4);
-  addPart(car, new THREE.BoxGeometry(0.9, 0.03, 0.2), MAT.carbon, 0, 0.46, -2.28);
-  for (const sx of [-1, 1]) addPart(car, new THREE.BoxGeometry(0.03, 0.58, 0.78), body, sx * 0.54, 0.84, -2.22);
-  addPart(car, new THREE.BoxGeometry(0.06, 0.55, 0.1), MAT.carbon, 0, 0.62, -2.12);
-  addPart(car, new THREE.BoxGeometry(0.16, 0.06, 0.03), MAT.tail, 0, 0.36, -2.38);
-  // onboard T-cam pod on the airbox, pitot on the nose, numbers on the rear-wing endplates
-  addPart(car, new THREE.BoxGeometry(0.09, 0.07, 0.24), MAT.carbon, 0, 1.03, -0.22);
-  strut(car, new THREE.Vector3(0, 0.5, 1.3), new THREE.Vector3(0, 0.62, 1.3), 0.008, MAT.carbon);
-  addNumber(car, number, 0.557, 0.86, -2.22, 0.5, 0.4);
-  // every part using the livery material gets the back -> front gradient
-  for (const m of car.children) if (m.material === body) paintGradient(m, front, back, 2.6, -1.8);
+function createOpenWheelCar(number, tcamColor) {
+  const car = new THREE.Group();
+  const TEAL = 0x00d2be;
+  const body = proceduralPaint(F1_LIVERY_GLSL, { uPart: 0, uAccent: new THREE.Color(TEAL) });
+  const wingPaint = proceduralPaint(F1_LIVERY_GLSL, { uPart: 1, uAccent: new THREE.Color(TEAL) }, { side: THREE.DoubleSide });
+  const silver = new THREE.MeshPhysicalMaterial({ color: 0x9a9ea3, metalness: 0.85, roughness: 0.24, clearcoat: 1, clearcoatRoughness: 0.05 });
+  const teal = new THREE.MeshPhysicalMaterial({ color: TEAL, metalness: 0.25, roughness: 0.22, clearcoat: 1 });
+  const black = MAT.carbon;
+  const ZN = 2.98, WB = 1.86, R = 0.33;   // nose tip, half wheelbase, tyre radius
 
-  // wheels + suspension
+  // --- nose, monocoque, airbox and engine cover: one loft
+  const top    = spline([[ZN, 0.27], [2.6, 0.31], [2.2, 0.4], [1.86, 0.5], [1.3, 0.6], [0.8, 0.65], [0.3, 0.66], [-0.1, 0.66], [-0.17, 0.69], [-0.33, 0.96], [-0.6, 0.93], [-1.0, 0.8], [-1.5, 0.58], [-1.9, 0.42], [-2.25, 0.33]]);
+  const bottom = spline([[ZN, 0.17], [2.6, 0.16], [2.2, 0.19], [1.86, 0.22], [1.4, 0.12], [0.8, 0.08], [-1.5, 0.08], [-1.8, 0.14], [-2.25, 0.2]]);
+  const halfW  = spline([[ZN, 0.07], [2.6, 0.09], [2.2, 0.11], [1.86, 0.14], [1.3, 0.21], [0.8, 0.27], [0.2, 0.29], [-0.3, 0.3], [-0.8, 0.28], [-1.3, 0.22], [-1.8, 0.14], [-2.25, 0.07]]);
+  const taper  = spline([[ZN, 0.25], [1.86, 0.3], [0.0, 0.3], [-0.2, 0.82], [-0.7, 0.8], [-1.1, 0.6], [-2.25, 0.4]]);
+  const pExp   = spline([[ZN, 2.6], [1.5, 3.0], [-0.1, 3.0], [-0.5, 2.4], [-2.25, 2.4]]);
+  const dip    = z => 0.15 * smoothstep(-0.15, -0.06, z) * smoothstep(0.74, 0.62, z);   // cockpit opening
+  const tubRings = [];
+  for (let z = -2.25; z < ZN; z += 0.02) tubRings.push(z);
+  tubRings.push(ZN);
+  const tub = loftGeometry(tubRings.map(z => superRing(z, {
+    w: halfW(z), b: bottom(z), t: top(z), p: pExp(z), taper: taper(z),
+    shapeY: (x, y, v) => y - dip(z) * Math.max(0, 1 - (x / 0.2) ** 4) * smoothstep(0.2, 0.9, v)
+  }, 56)));
+  addPart(car, tub, body);
+
+  // --- sidepods: slim and deeply undercut, tapering into the coke-bottle
+  const spX = spline([[0.72, 0.47], [0.4, 0.5], [-0.3, 0.47], [-0.9, 0.37], [-1.55, 0.22]]);
+  const spW = spline([[0.72, 0.17], [0.4, 0.21], [-0.3, 0.2], [-0.9, 0.13], [-1.55, 0.05]]);
+  const spT = spline([[0.72, 0.6], [0.4, 0.6], [-0.3, 0.55], [-0.9, 0.42], [-1.55, 0.22]]);
+  const spZ = [];
+  for (let z = -1.55; z < 0.72; z += 0.03) spZ.push(z);
+  spZ.push(0.72);
+  const pod = loftGeometry(spZ.map(z => superRing(z, { xc: spX(z), w: spW(z), b: 0.1, t: spT(z), p: 3.2, under: 0.45, taper: 0.1 }, 40)));
+  addPart(car, pod, body);
+  addPart(car, mirrorX(pod), body);
+
+  // --- floor, bargeboards, diffuser
+  addPart(car, new THREE.BoxGeometry(1.6, 0.025, 2.75), black, 0, 0.055, -0.15);
+  addPart(car, new THREE.BoxGeometry(1.0, 0.025, 0.5), black, 0, 0.055, 1.45);
+  addPart(car, taperedBox(1.0, 0.3, 1.0, 0.03, 0.62), black, 0, 0.05, -1.85);
+  for (let k = -2; k <= 2; k++) addPart(car, new THREE.BoxGeometry(0.01, 0.28, 0.6), black, k * 0.2, 0.06, -1.87);
+  for (const sx of [-1, 1]) {
+    addPart(car, new THREE.BoxGeometry(0.01, 0.3, 0.5), black, sx * 0.66, 0.21, 1.05);
+    addPart(car, new THREE.BoxGeometry(0.01, 0.24, 0.36), black, sx * 0.55, 0.19, 1.2);
+    addPart(car, new THREE.BoxGeometry(0.2, 0.01, 0.14), black, sx * 0.6, 0.44, 0.86, 0, 0, sx * 0.3);   // boomerang
+    addPart(car, new THREE.BoxGeometry(0.01, 0.12, 0.7), black, sx * 0.79, 0.12, -0.3);                   // floor edge fence
+  }
+
+  // --- front wing: main plane plus four flaps that rise and steepen toward the endplates
+  const foil = (le, chord, ang, thick) => {   // aerofoil ring at a station: leading edge (x, y, z), trailing edge raised by ang
+    const d = new THREE.Vector2(-Math.cos(ang), Math.sin(ang)), nrm = new THREE.Vector2(Math.sin(ang), Math.cos(ang));
+    const pts = [];
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * Math.PI * 2, s = (1 - Math.cos(a)) / 2;   // 0 -> 1 -> 0 round the section
+      const t = 5 * thick * (0.2969 * Math.sqrt(s) - 0.126 * s - 0.3516 * s * s + 0.2843 * s ** 3 - 0.1036 * s ** 4) * (i < 12 ? 1 : -1);
+      pts.push(new THREE.Vector3(le.x, le.y + (s * d.y + t * nrm.y) * chord, le.z + (s * d.x + t * nrm.x) * chord));
+    }
+    return pts;
+  };
+  const wingStations = (ax) => {   // leading edges of all five elements at this span position
+    const out = [];
+    const rise = smoothstep(0.5, 0.97, ax), inner = smoothstep(0.22, 0.42, ax);
+    let le = new THREE.Vector3(0, 0.085 + 0.025 * smoothstep(0.25, 0.9, ax), ZN - 0.1 * smoothstep(0.2, 1.0, ax));
+    let ang = 0.05 + 0.08 * smoothstep(0.3, 1, ax), chord = 0.3;
+    out.push({ le: le.clone(), chord, ang });
+    const chords = [0.16, 0.13, 0.12, 0.11];
+    for (let k = 0; k < 4; k++) {
+      const te = le.clone().add(new THREE.Vector3(0, Math.sin(ang) * chord, -Math.cos(ang) * chord));
+      le = te.add(new THREE.Vector3(0, 0.01 + 0.008 * rise, 0.035));
+      ang += (0.13 + 0.07 * rise) * inner;
+      chord = chords[k] * (0.15 + 0.85 * inner);
+      out.push({ le: le.clone(), chord, ang });
+    }
+    return out;
+  };
+  for (const sx of [-1, 1]) {
+    const xs = [];
+    for (let ax = 0.0; ax <= 0.985; ax += 0.025) xs.push(Math.min(ax, 0.985));
+    for (let k = 0; k < 5; k++) {
+      const span = k === 0 ? xs : xs.filter(ax => ax >= 0.22);
+      const rings = span.map(ax => { const st = wingStations(ax)[k]; st.le.x = sx * ax; return foil(st.le, st.chord, st.ang, k === 0 ? 0.1 : 0.12); });
+      addPart(car, loftGeometry(rings), wingPaint);
+    }
+    // endplate with footplate and a small canard
+    addPart(car, sideExtrude([[ZN, 0.07], [ZN, 0.15], [2.8, 0.27], [2.44, 0.3], [2.4, 0.07]], 0.012, sx * 0.99), black);
+    addPart(car, new THREE.BoxGeometry(0.06, 0.01, 0.5), black, sx * 0.97, 0.072, 2.7);
+    addPart(car, new THREE.BoxGeometry(0.08, 0.008, 0.12), black, sx * 1.03, 0.26, 2.62, 0.2);
+    // nose pylons down to the main plane
+    strut(car, new THREE.Vector3(sx * 0.05, 0.19, 2.62), new THREE.Vector3(sx * 0.09, 0.1, 2.76), 0.012, black);
+  }
+
+  // --- cockpit: halo, driver, mirrors, T-cam
+  const haloR = 0.37, haloZ = 0.1, haloY = 0.86;
+  addPart(car, new THREE.TorusGeometry(haloR, 0.032, 10, 32, Math.PI).rotateX(Math.PI / 2), silver, 0, haloY, haloZ);
+  for (const sx of [-1, 1]) {
+    strut(car, new THREE.Vector3(sx * haloR, haloY, haloZ), new THREE.Vector3(sx * haloR, haloY - 0.02, -0.12), 0.032, silver);
+    strut(car, new THREE.Vector3(sx * haloR, haloY - 0.02, -0.12), new THREE.Vector3(sx * 0.3, 0.62, -0.16), 0.03, silver);
+  }
+  strut(car, new THREE.Vector3(0, haloY, haloZ + haloR), new THREE.Vector3(0, 0.63, 0.82), 0.03, silver);
+  addPart(car, new THREE.SphereGeometry(0.14, 20, 14), new THREE.MeshPhysicalMaterial({ color: 0xf4f6f8, clearcoat: 1, roughness: 0.2 }), 0, 0.7, 0.06);
+  addPart(car, new THREE.SphereGeometry(0.142, 20, 8, Math.PI / 2 - 0.8, 1.6, 1.2, 0.45), MAT.glass, 0, 0.7, 0.06);   // visor
+  for (const sx of [-1, 1]) {
+    addPart(car, new THREE.BoxGeometry(0.17, 0.07, 0.06), silver, sx * 0.63, 0.74, 0.62);
+    addPart(car, new THREE.BoxGeometry(0.15, 0.055, 0.005), new THREE.MeshStandardMaterial({ color: 0x8a96a4, metalness: 1, roughness: 0.1 }), sx * 0.63, 0.74, 0.588);
+    addPart(car, new THREE.BoxGeometry(0.05, 0.02, 0.07), teal, sx * 0.71, 0.785, 0.62);
+    strut(car, new THREE.Vector3(sx * 0.5, 0.6, 0.6), new THREE.Vector3(sx * 0.58, 0.72, 0.62), 0.01, black);
+  }
+  addPart(car, new THREE.BoxGeometry(0.07, 0.05, 0.2), new THREE.MeshStandardMaterial({ color: tcamColor, roughness: 0.4 }), 0, top(-0.42) + 0.015, -0.42);
+  // shark fin and pitot
+  addPart(car, sideExtrude([[-0.45, 0.93], [-1.65, 0.72], [-1.65, 0.5], [-0.9, 0.76]], 0.01), body);
+  strut(car, new THREE.Vector3(0, 0.27, 2.9), new THREE.Vector3(0, 0.27, 3.1), 0.005, black);
+
+  // race number: dark digits straight on the silver nose (transparent decal), white on the rear-wing endplates
+  const nz = 1.1, ny = top(nz) + 0.004, slope = Math.atan2(top(nz + 0.05) - top(nz - 0.05), 0.1);
+  const numMat = new THREE.MeshStandardMaterial({
+    map: boardTexture(String(number), 'rgba(0,0,0,0)', '#26282c', 256), transparent: true, alphaTest: 0.4,
+    roughness: 0.3, metalness: 0.4, polygonOffset: true, polygonOffsetFactor: -2
+  });
+  addPart(car, new THREE.PlaneGeometry(0.42, 0.21), numMat, 0, ny, nz, -Math.PI / 2 - slope).castShadow = false;
+  const plateMat = new THREE.MeshStandardMaterial({ map: boardTexture(String(number), '#0d0e10', '#f4f4f4', 256), roughness: 0.5 });
+  for (const sx of [-1, 1]) addPart(car, new THREE.PlaneGeometry(0.3, 0.15), plateMat, sx * 0.538, 0.7, -2.42, 0, sx * Math.PI / 2);
+
+  // --- rear wing on a single pylon, with a beam wing, DRS pod and rain light
+  addPart(car, aerofoil(0.32, 0.1, 1.03), silver, 0, 0.8, -2.36, 0.15);
+  addPart(car, aerofoil(0.2, 0.09, 1.03, 0.03), teal, 0, 0.885, -2.56, 0.62);
+  addPart(car, aerofoil(0.18, 0.1, 0.8), black, 0, 0.36, -2.3, 0.3);
+  for (const sx of [-1, 1]) {
+    addPart(car, sideExtrude([[-2.15, 0.4], [-2.15, 0.96], [-2.68, 0.99], [-2.68, 0.36], [-2.4, 0.3]], 0.014, sx * 0.53), black);
+    addPart(car, new THREE.BoxGeometry(0.02, 0.06, 0.5), teal, sx * 0.53, 0.955, -2.42);
+  }
+  strut(car, new THREE.Vector3(0, 0.33, -2.2), new THREE.Vector3(0, 0.8, -2.36), 0.022, black);
+  addPart(car, new THREE.BoxGeometry(0.06, 0.05, 0.1), black, 0, 0.94, -2.5);
+  addPart(car, new THREE.BoxGeometry(0.16, 0.06, 0.03), MAT.tail, 0, 0.27, -2.27);
+
+  // --- wheels: 13" black rims, tall sidewalls, brake ducts, double wishbones
+  const style = { rim: MAT.rimDark, spoke: MAT.spokeDark, spokes: 5, rimFrac: 0.5 };
   const wheels = [];
-  const R = 0.36;
-  for (const [z, w, tx] of [[1.8, 0.36, 0.82], [-1.75, 0.44, 0.8]]) {
+  for (const [z, w, tx] of [[WB, 0.305, 0.85], [-WB, 0.405, 0.8]]) {
     for (const sx of [-1, 1]) {
-      const wh = createWheel(R, w, front);
+      const wh = createWheel(R, w, 0xbdbdbd, style);
       wh.group.position.set(sx * tx, R, z);
+      addPart(wh.group, new THREE.CylinderGeometry(0.15, 0.17, 0.1, 20).rotateZ(Math.PI / 2), black, -sx * (w / 2 + 0.05), 0, 0);
       car.add(wh.group);
       wheels.push(wh);
-      const inner = sx * (tx - w / 2);
-      strut(car, new THREE.Vector3(sx * 0.22, 0.42, z - 0.12), new THREE.Vector3(inner, 0.42, z), 0.018, MAT.carbon);
-      strut(car, new THREE.Vector3(sx * 0.22, 0.22, z + 0.12), new THREE.Vector3(inner, 0.3, z), 0.018, MAT.carbon);
+      const hub = sx * (tx - w / 2 - 0.08), fr = z > 0;
+      const yU = fr ? 0.5 : 0.46, yL = fr ? 0.2 : 0.18, inX = sx * (fr ? 0.16 : 0.12);
+      for (const dz of [-0.2, 0.2]) {
+        strut(car, new THREE.Vector3(inX, yU + 0.04, z + dz), new THREE.Vector3(hub, yU, z), 0.014, black);
+        strut(car, new THREE.Vector3(inX, yL, z + dz), new THREE.Vector3(hub, yL, z), 0.014, black);
+      }
+      strut(car, new THREE.Vector3(hub, fr ? yL : yU, z), new THREE.Vector3(inX, fr ? 0.56 : 0.2, z + (fr ? -0.1 : 0.1)), 0.012, black);   // push / pull rod
     }
   }
 
   car.userData = {
     wheels,
-    dustPoints: [new THREE.Vector3(-0.8, 0.12, -2.0), new THREE.Vector3(0.8, 0.12, -2.0)],
-    vortexPoints: [new THREE.Vector3(-0.54, 1.12, -2.55), new THREE.Vector3(0.54, 1.12, -2.55)],
-    onboard: new THREE.Vector3(0, 1.12, -0.12)   // T-cam: halo, nose and front wheels in view
+    dustPoints: [new THREE.Vector3(-0.8, 0.12, -2.15), new THREE.Vector3(0.8, 0.12, -2.15)],
+    vortexPoints: [new THREE.Vector3(-0.53, 0.99, -2.68), new THREE.Vector3(0.53, 0.99, -2.68)],
+    onboard: new THREE.Vector3(0, 1.16, -0.42)  // T-cam: halo, nose and front wheels in view
   };
   return splitBody(car);
 }
@@ -955,21 +1136,7 @@ const HC_LIVERY_GLSL = /* glsl */`
   }`;
 
 function hypercarPaint(accent) {
-  const m = new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.26, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.05 });
-  m.onBeforeCompile = sh => {
-    sh.uniforms.uAccent = { value: new THREE.Color(accent) };
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute float zone;\nvarying vec3 vLp;\nvarying vec3 vLn;\nvarying float vZone;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLp = position; vLn = normal; vZone = zone;');
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', `#include <common>\nuniform vec3 uAccent;\nvarying vec3 vLp;\nvarying vec3 vLn;\nvarying float vZone;\n${HC_LIVERY_GLSL}`)
-      .replace('vec4 diffuseColor = vec4( diffuse, opacity );',
-        'vec3 lvCol; float lvRough, lvMetal, lvCoat;\nlivery(lvCol, lvRough, lvMetal, lvCoat);\nvec4 diffuseColor = vec4( lvCol, opacity );')
-      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = lvRough;')
-      .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor = lvMetal;')
-      .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\n#ifdef USE_CLEARCOAT\nmaterial.clearcoat *= lvCoat;\n#endif');
-  };
-  return m;
+  return proceduralPaint(HC_LIVERY_GLSL, { uAccent: new THREE.Color(accent) }, { zone: true });
 }
 
 // Wing / fin profile in the side (z, y) plane, extruded across x
@@ -1290,8 +1457,8 @@ function speedProfile(c) {
 }
 
 const racers = [
-  { name: 'F-Style Open Wheel #1', css: '#1fe0ff,#0a2bb8', car: createOpenWheelCar(0x1fe0ff, 0x0a2bb8, 1), spec: OW },
-  { name: 'F-Style Open Wheel #4', css: '#ffc233,#d93a0b', car: createOpenWheelCar(0xffc233, 0xd93a0b, 4), spec: { ...OW, mu: OW.mu * 0.97 } },
+  { name: 'W10-Style F1 #44',      css: '#9aa0a6,#00d2be', car: createOpenWheelCar(44, 0x111111), spec: OW },
+  { name: 'W10-Style F1 #77',      css: '#9aa0a6,#ffd400', car: createOpenWheelCar(77, 0xffd400), spec: { ...OW, mu: OW.mu * 0.97 } },
   { name: 'LMDh Hypercar #7',      css: '#f2f2f2,#d5001c', car: createHypercar(0xd5001c, 7), spec: HC },
   { name: 'LMDh Hypercar #8',      css: '#f2f2f2,#0e7a4a', car: createHypercar(0x0e7a4a, 8), spec: { ...HC, mu: HC.mu * 0.97 } }
 ];
@@ -1481,7 +1648,7 @@ function startRace() {
 }
 function startOvertake() {
   state.raceT = GO;   // lights already out
-  // Open Wheel #1 sits in the tow of Hypercar #8 on the downhill run into the Red Water dip; the other two trail far behind
+  // F1 #44 sits in the tow of Hypercar #8 on the downhill run into the Red Water dip; the other two trail far behind
   const d = samples[iDip].dist - 110;
   resetRacer(racers[3], d, 0, 28);
   resetRacer(racers[0], d - 10, 0, 28);   // closes in ~3 s and goes through on the inside at the dip
