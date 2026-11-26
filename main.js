@@ -25,15 +25,15 @@ renderer.toneMappingExposure = 1.05;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0xd9a882, 160, 1150);
+scene.fog = new THREE.Fog(0xd9a882, 320, 2900);
 
-const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 4000);
+const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 6500);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.maxPolarAngle = Math.PI * 0.62;   // allow low "looking-up" angles
 controls.minDistance = 3;
-controls.maxDistance = 900;
+controls.maxDistance = 2800;
 
 /* =====================================================================
    2. SKY + LIGHTING (golden hour)
@@ -73,7 +73,7 @@ function createSkyMaterial() {
   });
 }
 const skyMaterial = createSkyMaterial();
-const sky = new THREE.Mesh(new THREE.SphereGeometry(1800, 48, 24), skyMaterial);
+const sky = new THREE.Mesh(new THREE.SphereGeometry(3200, 48, 24), skyMaterial);
 sky.renderOrder = -1;
 scene.add(sky);
 
@@ -98,38 +98,73 @@ sun.shadow.normalBias = 0.04;
 scene.add(hemi, ambient, sun, sun.target);
 
 /* =====================================================================
-   3. TRACK (CatmullRomCurve3 + custom ribbon geometry)
+   3. TRACK (1:1 Circuit de Spa-Francorchamps, 7.004 km, real elevation)
    ===================================================================== */
-const TRACK_HALF_W = 9;
+const TRACK_HALF_W = 6.5;   // 13 m asphalt width (real F1 Spa width)
 
-// Spa-style lap: T1 hairpin -> downhill -> dip (Red Water) -> esses climbing (Raidillon) -> crest -> long straight ->
-// right-hander at the top -> sweeping return -> chicane -> start/finish straight -> T1.
-// Corner radii must stay above TRACK_HALF_W + 8.5 (hairpin: 20 m) or the inner guardrail folds over itself
+// 1:1 GPS/metric centreline (TUMFTM/OpenStreetMap) + real EU-DEM 25m Ardennes elevation (105.8 m span).
+// Centred at (0, 0), +X = East, -Z = North, clockwise from F1 Start/Finish straight:
+// Start/Finish -> La Source (T1) -> Eau Rouge (T2-T3) -> Raidillon (T4) -> Kemmel Straight ->
+// Les Combes & Malmedy (T5-T7) -> Bruxelles (T8) -> Speaker's Corner (T9) -> Pouhon (T10-T11) ->
+// Campus/Fagnes (T12-T13) -> Stavelot (T14-T15) -> Paul Frere -> Blanchimont (T16-T17) -> Bus Stop (T18-T19).
 const controlPoints = [
-  [-150, 21, 119], [-100, 14, 96], [-55, 5, 70], [-15, 0, 48],
-  [7.5, 1.9, 27], [15, 7.5, 0], [7.5, 15, -30], [18, 22.5, -67.5],
-  [37.5, 28.8, -120], [75, 31.3, -180], [135, 31.3, -210], [195, 27.5, -165],
-  [210, 23.8, -60], [180, 21.3, 60], [110, 22.5, 145], [88, 23.5, 152],
-  [70, 23.5, 152], [64, 23.5, 152.9], [58.6, 23.5, 155.6], [54.2, 23.5, 159.7],
-  [51.3, 23.5, 165], [48.3, 23.5, 170.3], [43.9, 23.5, 174.4], [38.5, 23.5, 177.1],
-  [32.5, 23.5, 178], [14.5, 23.8, 178], [-40, 25, 178], [-110, 25, 178],
-  [-165, 25, 178], [-190, 25, 178], [-197.7, 25, 176.5], [-204.2, 25, 172.1],
-  [-208.5, 25, 165.6], [-210, 25, 157.9], [-208.4, 25, 150.2], [-204, 25, 143.8],
-  [-197.5, 25, 139.5]
+  [-234.9,52.2,-676.3], [-256.2,52.7,-710.1], [-277.4,52.9,-744], [-298.6,52.6,-777.9], [-319.8,52.5,-811.9], [-333.1,53,-833],
+  [-346.4,54,-854.2], [-367.7,57,-888], [-389,60.6,-921.9], [-404.9,63.1,-947.3], [-417.9,64.5,-968.6], [-428.6,65,-985.5],
+  [-432.8,64.9,-994.6], [-433.5,64.7,-1004.2], [-429.1,64.3,-1013.3], [-421.9,63.7,-1020.1], [-407.8,62.8,-1017.1], [-371.2,60.2,-1000.9],
+  [-334.5,57.8,-985], [-298.2,55.8,-968.3], [-262.7,54,-949.8], [-228.5,52.5,-929.2], [-203.6,51.2,-912.4], [-183.4,49.4,-897.7],
+  [-159.6,46.6,-879.5], [-140.7,44.1,-863.2], [-112.7,40.9,-834.7], [-85.6,38.3,-805.2], [-58.5,35.4,-775.8], [-31.5,32.7,-746.3],
+  [-4.6,30.3,-716.7], [22.3,28.3,-687.2], [49.3,27.2,-657.7], [66.4,26.9,-639.5], [80.9,27,-625.7], [93.2,27.3,-617.3],
+  [115.6,28.3,-606.1], [137.1,29.7,-593.2], [148.9,30.7,-584.2], [159.2,31.7,-573.4], [173.4,33.4,-552.8], [184,35.3,-530.2],
+  [191.5,37.6,-506.5], [197.8,41.6,-471.9], [202.4,44.3,-452.5], [208,46.4,-438.8], [220.9,49.8,-417.3], [243.8,54.6,-384.5],
+  [266.7,58.3,-351.7], [289.5,61.1,-318.9], [312.4,64.2,-286.1], [335.4,67.6,-253.4], [358,70.8,-220.4], [371.4,72.3,-199.4],
+  [383.2,73.3,-177.3], [393.1,73.8,-154.3], [406.3,74.2,-116.6], [418.9,74.4,-78.7], [431.4,74.7,-40.7], [444,75.2,-2.7],
+  [456.5,75.9,35.2], [469.1,77.2,73.2], [481.7,79.2,111.1], [494.3,81.6,149.1], [506.8,84.3,187.1], [519.4,87.2,225.1],
+  [531.9,89.5,263], [544.4,90.7,301], [556.9,91.1,339], [569.4,91.2,377], [581.9,91.9,414.9], [594.5,93.4,452.9],
+  [607,95.1,490.9], [619.6,96.4,528.9], [629.1,96.9,557.3], [633.2,96.8,571.7], [634.9,96.5,586.5], [632.7,96,601.2],
+  [624.9,95.4,614], [613.9,94.9,624.1], [601.1,94.4,631.8], [589.9,94.3,641.7], [582.2,94.6,654.5], [577.9,95.4,668.8],
+  [578.2,96.5,683.7], [589.1,100.3,722.2], [596.2,102.5,746.2], [603.2,104.1,770.2], [605.6,104.7,784.9], [605.3,105.2,799.8],
+  [601.2,105.6,814.3], [593,105.8,826.8], [561.6,105.5,851.3], [529.7,104.1,875.4], [497.9,102.1,899.6], [466,100.1,923.8],
+  [434.1,98.6,948], [402.3,97.3,972.2], [370.5,95.3,996.4], [350.3,93.5,1011.3], [337.3,92.2,1018.4], [327.7,91.2,1020.1],
+  [312.5,89.7,1018.3], [298.5,88.2,1013.7], [286.1,86.7,1005.4], [276.7,85.4,993.8], [271.4,84.3,979.8], [270.8,83.7,964.9],
+  [274.8,83.6,950.5], [282.9,83.9,938], [293.7,84.5,927.7], [318.9,85.8,911.5], [340.2,86.4,898.3], [361,85.7,884.5],
+  [381.7,83.6,870.5], [394,82,861.9], [404.6,80.2,851.5], [412.1,78.4,838.5], [415.2,76.6,823.9], [414,74.7,809.1],
+  [406.5,71.7,785.2], [391.9,66.7,748], [377.6,61.9,710.7], [363.8,57.3,673.1], [352.1,53.4,634.9], [342.4,50.7,596.1],
+  [333.7,48.2,557.1], [325,45.8,518.1], [316.3,43.5,479], [307.6,41.1,440], [299.3,38.8,400.9], [293.9,37.4,376.4],
+  [287.5,36.2,357.6], [280.7,35.2,344.3], [272,34.1,332.1], [261.5,32.9,321.4], [249.4,31.7,312.6], [231.4,29.8,303.8],
+  [217.1,28.4,299.5], [177.2,24.4,297.2], [152.3,22.1,296.4], [127.3,20,298], [102.9,18.3,303.2], [79.9,16.9,312.7],
+  [58.9,15.9,326.2], [40.3,15,342.9], [24.6,14.2,362.3], [12.2,13.4,383.9], [2.8,12.7,407], [-10.1,11.7,444.9],
+  [-23.7,11.2,482.5], [-37.1,11.5,520.2], [-50.5,12.6,557.9], [-64,14.1,595.5], [-77.4,16.1,633.2], [-90.9,18.1,670.8],
+  [-99.9,18.7,694.1], [-107.4,18.6,707], [-117.1,18.1,718.4], [-128.9,17.4,727.6], [-142.4,16.5,734.1], [-156.9,15.5,737.5],
+  [-171.9,14.4,737.6], [-195.8,12.8,730.8], [-209.5,11.9,724.9], [-231.2,10.6,712.3], [-245.1,9.9,707], [-259.9,9.4,704.7],
+  [-274.9,9.1,704.9], [-289.3,8.9,708.8], [-302.7,9,715.5], [-314.7,9.3,724.5], [-324.5,9.6,735.7], [-344.7,10.6,770.2],
+  [-364.3,11.2,805.1], [-384.7,11.7,839.4], [-405.1,12.4,873.9], [-417.5,12.7,895.6], [-425.4,12.6,908.2], [-435.1,12.1,919.5],
+  [-448,11.3,927.3], [-462.4,10,930.3], [-477.4,8.6,928.8], [-491.3,7,923.6], [-524.7,3,901.6], [-545.7,1.2,888],
+  [-566.6,0.2,874.3], [-587.7,0.1,861], [-599.8,0.5,852], [-610.4,1.2,841.6], [-619.2,2.4,829.4], [-626.1,3.8,816.1],
+  [-631.2,5.4,802.1], [-634.2,7,787.4], [-634.9,8.4,772.4], [-632.9,9.6,757.6], [-625.9,10.8,733.6], [-618.2,11.1,709.8],
+  [-609.9,10.8,686.3], [-600.3,10.3,663.2], [-589,9.9,640.9], [-576.1,10.1,619.5], [-561.9,10.9,599], [-536.8,13.3,567.9],
+  [-509.9,16,538.3], [-482.9,18,508.8], [-465.4,18.7,491], [-446.7,19.1,474.4], [-426.8,19.4,459.3], [-393,19.9,438],
+  [-358.2,20.5,418.3], [-323.5,21.7,398.4], [-289,23.4,378.2], [-253.8,25.3,359.1], [-232.4,26.2,346.2], [-212.3,26.8,331.5],
+  [-193.6,27.4,315], [-176.2,28,297], [-160.2,29,277.8], [-145.9,30.4,257.3], [-134,32.2,235.4], [-120,34.5,203.3],
+  [-110.7,35.6,180.1], [-101.4,35.8,156.9], [-92,35,133.8], [-77,32.4,96.7], [-67.9,30.7,73.3], [-62.3,29.5,49.2],
+  [-60.6,29.3,24.1], [-62,29.8,9.2], [-68.3,31.3,-14.8], [-83.1,34.5,-52], [-98.9,36.9,-88.8], [-114.6,38.4,-125.5],
+  [-130.2,40.2,-162.4], [-145.8,42.3,-199.2], [-155.2,43.7,-222.3], [-163.3,44.9,-246], [-169.7,46.2,-270.1], [-177.5,48.1,-309.3],
+  [-183.1,49.1,-348.9], [-187.8,49.3,-388.6], [-191.4,49.1,-418.4], [-194.5,48.2,-443.2], [-197.5,46.6,-468], [-199.4,45.3,-482.9],
+  [-199.5,44.4,-492.8], [-195.6,43.4,-502], [-186.9,42.5,-505.9], [-171.9,41.4,-505.8], [-156.7,40.7,-503.4], [-148.1,40.6,-506.5],
+  [-141.8,40.7,-514.5], [-139.7,41.1,-523.8], [-151.9,43,-545.4], [-173.4,46.6,-579.2], [-194.8,49.6,-612.9], [-216.2,51.4,-646.7]
 ].map(p => new THREE.Vector3(...p));
 
 // Catmull-Rom is only C1: its curvature, and with it a car's yaw rate, jumps at every control point.
 // Resampling every ~2 m and averaging neighbours gives a centreline whose curvature changes smoothly.
 const curve = (() => {
   const rough = new THREE.CatmullRomCurve3(controlPoints, true, 'centripetal');
-  rough.arcLengthDivisions = 20000;
+  rough.arcLengthDivisions = 40000;
   const M = Math.round(rough.getLength() / 2);
   let pts = rough.getSpacedPoints(M).slice(0, M);
   for (let pass = 0; pass < 8; pass++) {
     pts = pts.map((p, i) => p.clone().add(pts[(i + M - 1) % M]).add(pts[(i + 1) % M]).divideScalar(3));
   }
   const c = new THREE.CatmullRomCurve3(pts, true, 'centripetal');
-  c.arcLengthDivisions = 20000;   // the default 200 makes getPointAt surge and lag inside tight corners
+  c.arcLengthDivisions = 40000;   // fine arc-length lookup across the full 7 km circuit
   return c;
 })();
 const N = Math.round(curve.getLength() / 10) * 10;   // ~1 m per sample, a multiple of 10 for the racing-line solver
@@ -150,6 +185,48 @@ const samples = [];
 }
 const TRACK_LEN = samples[N].dist;
 
+// Fast 2D spatial hash over track samples so terrain & forest queries stay O(1) across 7,000 samples
+const trackGrid = (() => {
+  const CELL = 40, map = new Map();
+  const key = (cx, cz) => cx * 4096 + cz;
+  for (let i = 0; i < N; i++) {
+    const p = samples[i].p, k = key(Math.floor(p.x / CELL), Math.floor(p.z / CELL));
+    let bucket = map.get(k);
+    if (!bucket) { bucket = []; map.set(k, bucket); }
+    bucket.push(i);
+  }
+  return { CELL, map, key };
+})();
+
+function nearestTrack(x, z, exact = false) {
+  const { CELL, map, key } = trackGrid;
+  const cx = Math.floor(x / CELL), cz = Math.floor(z / CELL);
+  let best = Infinity, bi = -1;
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dz = -2; dz <= 2; dz++) {
+      const bucket = map.get(key(cx + dx, cz + dz));
+      if (!bucket) continue;
+      for (let k = 0; k < bucket.length; k++) {
+        const i = bucket[k], p = samples[i].p;
+        const d = (p.x - x) ** 2 + (p.z - z) ** 2;
+        if (d < best) { best = d; bi = i; }
+      }
+    }
+  }
+  if (bi >= 0) return { d: Math.sqrt(best), y: samples[bi].p.y, i: bi };
+  if (!exact) return { d: 999, y: 0, i: 0 };
+  for (let i = 0; i < N; i += 3) {
+    const p = samples[i].p, d = (p.x - x) ** 2 + (p.z - z) ** 2;
+    if (d < best) { best = d; bi = i; }
+  }
+  const c = bi;
+  for (let k = -3; k <= 3; k++) {
+    const i = (c + k + N) % N, p = samples[i].p, d = (p.x - x) ** 2 + (p.z - z) ** 2;
+    if (d < best) { best = d; bi = i; }
+  }
+  return { d: Math.sqrt(best), y: samples[bi].p.y, i: bi };
+}
+
 // Frame at an arbitrary distance along the track (for cars)
 function frameAt(dist) {
   const u = (((dist % TRACK_LEN) + TRACK_LEN) % TRACK_LEN) / TRACK_LEN;
@@ -169,27 +246,67 @@ function placeOnTrack(obj, dist, lat = 0, lift = 0) {
   return f;
 }
 
-// Where the curvature is high we place kerbs
+// Signed centreline horizontal curvature (+ = left-hander toward +x) and adaptive guardrail offsets
+// so barriers pull in tightly on hairpin/chicane apexes (La Source, Bus Stop) and never fold over themselves
+const RAIL_BASE = TRACK_HALF_W + 8.5;
+const RAIL_MIN = TRACK_HALF_W + 1.4;
+const railOffsets = (() => {
+  const ds = TRACK_LEN / N;
+  const cKappa = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const a = samples[(i - 4 + N) % N].t, b = samples[(i + 4) % N].t;
+    const d = Math.atan2(b.x, b.z) - Math.atan2(a.x, a.z);
+    cKappa[i] = Math.atan2(Math.sin(d), Math.cos(d)) / (8 * ds);
+  }
+  const buildSide = side => {
+    const raw = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      const kIn = side * cKappa[i];
+      raw[i] = kIn > 1e-4 ? Math.max(RAIL_MIN, Math.min(RAIL_BASE, (1 / kIn) * 0.68)) : RAIL_BASE;
+    }
+    let offs = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      let m = RAIL_BASE;
+      for (let j = -12; j <= 12; j++) m = Math.min(m, raw[(i + j + N) % N]);
+      offs[i] = m;
+    }
+    for (let p = 0; p < 16; p++) {
+      const next = new Float64Array(N);
+      for (let i = 0; i < N; i++) {
+        let s = 0;
+        for (let j = -8; j <= 8; j++) s += offs[(i + j + N) % N];
+        next[i] = Math.min(raw[i], s / 17);
+      }
+      offs = next;
+    }
+    return offs;
+  };
+  return { left: buildSide(1), right: buildSide(-1) };
+})();
+const railOff = (side, i) => (side > 0 ? railOffsets.left : railOffsets.right)[((i % N) + N) % N];
+
+// Where the curvature is high we place kerbs (covers La Source, Eau Rouge/Raidillon, Les Combes, Pouhon, Bus Stop, etc.)
 const kerbMask = new Array(N).fill(false);
 {
   const a = new THREE.Vector2(), b = new THREE.Vector2();
   for (let i = 0; i < N; i++) {
     const s0 = samples[i].t, s1 = samples[(i + 10) % N].t;
     a.set(s0.x, s0.z).normalize(); b.set(s1.x, s1.z).normalize();
-    if (Math.acos(Math.min(1, a.dot(b))) > 0.075) {
+    if (Math.acos(Math.min(1, a.dot(b))) > 0.06) {
       for (let k = -14; k <= 24; k++) kerbMask[(i + k + N) % N] = true;
     }
   }
 }
 
-// Generic ribbon builder along the track; edge(sample, side) returns a Vector3
+// Generic ribbon builder along the track; edge(sample, side, index) returns a Vector3
 function buildStrip({ edge, filter = null, color = null, vScale = 10 }) {
   const pos = [], uv = [], col = [];
   const push = v => pos.push(v.x, v.y, v.z);
   for (let i = 0; i < N; i++) {
     if (filter && !filter(i)) continue;
+    const j = (i + 1) % N;
     const a = samples[i], b = samples[i + 1];
-    const a0 = edge(a, 0), a1 = edge(a, 1), b0 = edge(b, 0), b1 = edge(b, 1);
+    const a0 = edge(a, 0, i), a1 = edge(a, 1, i), b0 = edge(b, 0, j), b1 = edge(b, 1, j);
     push(a0); push(b0); push(a1); push(a1); push(b0); push(b1);
     const va = a.dist / vScale, vb = b.dist / vScale;
     uv.push(0, va, 0, vb, 1, va, 1, va, 0, vb, 1, vb);
@@ -205,9 +322,9 @@ function buildStrip({ edge, filter = null, color = null, vScale = 10 }) {
 // Flat ribbon between lateral offsets o0 < o1, with lift (height) l0 / l1
 const flatEdge = (o0, o1, l0 = 0, l1 = l0) => (s, side) =>
   s.p.clone().addScaledVector(s.x, side ? o1 : o0).addScaledVector(s.y, side ? l1 : l0);
-// Vertical ribbon at lateral offset o from height h0 to h1
-const wallEdge = (o, h0, h1) => (s, side) =>
-  s.p.clone().addScaledVector(s.x, o).addScaledVector(UP, side ? h1 : h0);
+// Vertical ribbon at lateral offset o (number or fn(i)) from height h0 to h1
+const wallEdge = (o, h0, h1) => (s, side, i) =>
+  s.p.clone().addScaledVector(s.x, typeof o === 'function' ? o(i) : o).addScaledVector(UP, side ? h1 : h0);
 
 // --- Procedural asphalt textures (color + roughness for wet-ish sheen on the racing line)
 function asphaltTextures() {
@@ -269,12 +386,12 @@ function createTrack() {
   road.receiveShadow = true;
   group.add(road);
 
-  // Red/white kerbs (raised on the outer edge)
-  const red = new THREE.Color(0xd41c1c), white = new THREE.Color(0xf3f1ec);
-  const kerbColor = (i, s) => (Math.floor(s.dist / 1.6) % 2 ? red : white);
+  // Iconic Spa red/yellow kerbs (raised on the outer edge)
+  const red = new THREE.Color(0xd41c1c), yellow = new THREE.Color(0xf2c200);
+  const kerbColor = (i, s) => (Math.floor(s.dist / 1.6) % 2 ? red : yellow);
   const kerbMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.45, metalness: 0.05 });
   for (const side of [-1, 1]) {
-    const edge = side < 0 ? flatEdge(-W - 0.05, -W + 1.1, 0.07, 0.015) : flatEdge(W - 1.1, W + 0.05, 0.015, 0.07);
+    const edge = side < 0 ? flatEdge(-W - 0.05, -W + 1.0, 0.07, 0.015) : flatEdge(W - 1.0, W + 0.05, 0.015, 0.07);
     const kerb = new THREE.Mesh(buildStrip({ edge, filter: i => kerbMask[i], color: kerbColor }), kerbMat);
     kerb.receiveShadow = true;
     group.add(kerb);
@@ -283,38 +400,44 @@ function createTrack() {
   // White edge lines (where there are no kerbs)
   const lineMat = new THREE.MeshStandardMaterial({ color: 0xf2efe6, roughness: 0.6 });
   for (const side of [-1, 1]) {
-    const o0 = side < 0 ? -W + 0.3 : W - 0.55, o1 = o0 + 0.25;
+    const o0 = side < 0 ? -W + 0.25 : W - 0.5, o1 = o0 + 0.25;
     const line = new THREE.Mesh(buildStrip({ edge: flatEdge(o0, o1, 0.012), filter: i => !kerbMask[i] }), lineMat);
     line.receiveShadow = true;
     group.add(line);
   }
 
-  // Grass shoulders sloping down to the terrain
+  // Grass shoulders sloping down to the terrain (clamped inside tight apex barriers so they never fold)
   const shoulderMat = new THREE.MeshStandardMaterial({ color: 0x4f7d33, roughness: 0.95, map: grassTexture(1) });
   for (const side of [-1, 1]) {
-    const edge = side < 0 ? flatEdge(-W - 4, -W, -0.38, -0.01) : flatEdge(W, W + 4, -0.01, -0.38);
+    const edge = (s, sd, i) => {
+      const out = Math.min(W + 4, railOff(side, i) + 0.3);
+      const lat = side < 0 ? (sd ? -W : -out) : (sd ? out : W);
+      const lift = (side < 0 ? !sd : sd) ? -0.38 : -0.01;
+      return s.p.clone().addScaledVector(s.x, lat).addScaledVector(s.y, lift);
+    };
     const sh = new THREE.Mesh(buildStrip({ edge, vScale: 4 }), shoulderMat);
     sh.receiveShadow = true;
     group.add(sh);
   }
 
-  // Armco guardrails + posts
+  // Armco guardrails + posts (adaptive offset follows tight inner apexes cleanly)
   const railMat = new THREE.MeshStandardMaterial({ color: 0xc9ccd1, metalness: 0.85, roughness: 0.32, side: THREE.DoubleSide });
   const postGeo = new THREE.BoxGeometry(0.12, 0.9, 0.12);
   const postMat = new THREE.MeshStandardMaterial({ color: 0x8a8d92, metalness: 0.6, roughness: 0.5 });
-  const POST_STEP = 5;
+  const POST_STEP = 6;
   const posts = new THREE.InstancedMesh(postGeo, postMat, Math.ceil(N / POST_STEP) * 2);
   let pi = 0;
   const m = new THREE.Matrix4();
   for (const side of [-1, 1]) {
-    const off = side * (W + 8.5);
+    const offFn = i => side * railOff(side, i);
     for (const [h0, h1] of [[0.12, 0.42], [0.5, 0.8]]) {
-      const rail = new THREE.Mesh(buildStrip({ edge: wallEdge(off, h0 - 0.35, h1 - 0.35) }), railMat);
+      const rail = new THREE.Mesh(buildStrip({ edge: wallEdge(offFn, h0 - 0.35, h1 - 0.35) }), railMat);
       rail.castShadow = rail.receiveShadow = true;
       group.add(rail);
     }
     for (let i = 0; i < N; i += POST_STEP) {
       const s = samples[i];
+      const off = side * railOff(side, i);
       const p = s.p.clone().addScaledVector(s.x, off - side * 0.1);
       p.y += -0.35 + 0.45;
       m.makeRotationY(Math.atan2(s.t.x, s.t.z)).setPosition(p);
@@ -330,9 +453,9 @@ function createTrack() {
 scene.add(createTrack());
 
 /* ---------- 3b. Start line, grid slots, light gantry ---------- */
-const GRID_I = nearestTrack(-100, 178).i;      // on the start/finish straight between the chicane and the T1 hairpin
+const GRID_I = 0;   // F1 Start/Finish straight between Bus Stop chicane and La Source (T1)
 const GRID_DIST = samples[GRID_I].dist;
-const GRID_SLOTS = [0, 1, 2, 3].map(k => ({ dist: GRID_DIST - 6 - k * 8, lat: k % 2 ? 3 : -3 }));   // staggered 2-wide
+const GRID_SLOTS = [0, 1, 2, 3].map(k => ({ dist: GRID_DIST - 6 - k * 8, lat: k % 2 ? 2.5 : -2.5 }));   // staggered 2-wide
 const startLights = [];                         // one material per red light, switched in the loop
 {
   const paint = new THREE.MeshStandardMaterial({ color: 0xf2efe6, roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -2 });
@@ -378,44 +501,49 @@ const startLights = [];                         // one material per red light, s
 }
 
 /* =====================================================================
-   4. TERRAIN (Ardennes hills, flattened along the track)
+   4. TERRAIN (Ardennes hills following Spa's real 105 m elevation range)
    ===================================================================== */
-function nearestTrack(x, z) {
-  let best = Infinity, bi = 0;
-  for (let i = 0; i < N; i += 3) {
-    const p = samples[i].p, dx = p.x - x, dz = p.z - z, d = dx * dx + dz * dz;
-    if (d < best) { best = d; bi = i; }
-  }
-  const c = bi;
-  for (let k = -3; k <= 3; k++) {
-    const i = (c + k + N) % N, p = samples[i].p, dx = p.x - x, dz = p.z - z, d = dx * dx + dz * dz;
-    if (d < best) { best = d; bi = i; }
-  }
-  return { d: Math.sqrt(best), y: samples[bi].p.y, i: bi };
-}
+const TRACK_R = Math.max(...samples.map(s => Math.hypot(s.p.x, s.p.z)));
 
-// Radius around (0, -10) that holds the whole circuit; terrain is levelled inside it, hills rise outside
-const TRACK_R = Math.max(...samples.map(s => Math.hypot(s.p.x, s.p.z + 10)));
+// Coarse anchors along the 7 km lap so surrounding Ardennes hills naturally match the track's altitude
+// (high ~105 m ridge at Les Combes/Malmedy, low ~0 m valley at Stavelot, rising hillside at Raidillon)
+const elevAnchors = [];
+for (let i = 0; i < N; i += Math.floor(N / 70)) {
+  const p = samples[i].p;
+  elevAnchors.push([p.x, p.y, p.z]);
+}
+function baseArdennesY(x, z) {
+  let num = 0, den = 0;
+  for (let k = 0; k < elevAnchors.length; k++) {
+    const a = elevAnchors[k], dx = x - a[0], dz = z - a[2];
+    const w = 1 / (dx * dx + dz * dz + 65000);
+    num += w * a[1];
+    den += w;
+  }
+  return num / den;
+}
 
 function naturalHeight(x, z) {
-  let h = 14 * Math.sin(x * 0.008 + 0.5) * Math.cos(z * 0.009)
-        + 7 * Math.sin(x * 0.021 + 2.0) * Math.sin(z * 0.017 + 1.0)
-        + 2.2 * Math.sin(x * 0.06) * Math.cos(z * 0.05);
-  const r = Math.hypot(x, z + 10);
-  h += Math.max(0, r - TRACK_R - 70) * 0.2;   // ring of taller hills in the distance
-  return h + 15;
+  let h = baseArdennesY(x, z)
+        + 14 * Math.sin(x * 0.0045 + 0.5) * Math.cos(z * 0.005)
+        + 7 * Math.sin(x * 0.014 + 2.0) * Math.sin(z * 0.012 + 1.0)
+        + 2.4 * Math.sin(x * 0.045) * Math.cos(z * 0.04);
+  const r = Math.hypot(x, z);
+  h += Math.max(0, r - TRACK_R - 90) * 0.16;   // taller forested ridges framing the valley
+  return h;
 }
 
-const FLAT = TRACK_HALF_W + 10, BLEND = 42;
+const FLAT = TRACK_HALF_W + 9, BLEND = 52;
 function groundHeight(x, z) {
   const nat = naturalHeight(x, z);
-  if (Math.hypot(x, z + 10) > TRACK_R + 60) return nat;
+  if (Math.hypot(x, z) > TRACK_R + 90) return nat;
   const n = nearestTrack(x, z);
+  if (n.d >= FLAT + BLEND) return nat;
   return lerp(n.y - 0.35, nat, smoothstep(FLAT, FLAT + BLEND, n.d));
 }
 
 function createTerrain() {
-  const SIZE = 1700, SEG = 425;
+  const SIZE = 3400, SEG = 460;
   const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG).rotateX(-Math.PI / 2);
   const pos = geo.attributes.position;
   const colors = new Float32Array(pos.count * 3);
@@ -425,13 +553,13 @@ function createTerrain() {
     const x = pos.getX(i), z = pos.getZ(i);
     const y = groundHeight(x, z);
     pos.setY(i, y);
-    const noise = 0.5 + 0.5 * Math.sin(x * 0.05 + Math.cos(z * 0.04) * 2.0) * Math.cos(z * 0.031);
+    const noise = 0.5 + 0.5 * Math.sin(x * 0.035 + Math.cos(z * 0.03) * 2.0) * Math.cos(z * 0.025);
     c.copy(cA).lerp(cB, noise);
-    if (Math.hypot(x, z + 10) < TRACK_R + 60) {
+    if (Math.hypot(x, z) < TRACK_R + 90) {
       const d = nearestTrack(x, z).d;
-      c.lerp(cMown, 1 - smoothstep(FLAT - 2, FLAT + 8, d));
+      if (d < FLAT + 12) c.lerp(cMown, 1 - smoothstep(FLAT - 2, FLAT + 10, d));
     }
-    c.lerp(cRock, smoothstep(45, 90, y) * 0.6);
+    c.lerp(cRock, smoothstep(95, 175, y) * 0.55);
     colors.set([c.r, c.g, c.b], i * 3);
   }
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -505,23 +633,35 @@ function boardTexture(text, bg, fg, w = 1024) {
   return t;
 }
 
-// Index of the lowest point = the "Red Water" dip
-let iDip = 0;
-for (let i = 0; i < N; i++) if (samples[i].p.y < samples[iDip].p.y) iDip = i;
-
-function placeBeside(index, offset) {
-  // choose the side whose spot isn't closer to another part of the track
-  for (const sign of [1, -1]) {
-    const s = samples[(index + N) % N];
-    const p = s.p.clone().addScaledVector(s.x, sign * offset);
-    if (nearestTrack(p.x, p.z).d > offset - 2) return { p, s, sign };
-  }
-  const s = samples[(index + N) % N];
-  return { p: s.p.clone().addScaledVector(s.x, offset), s, sign: 1 };
+// Index of the Eau Rouge valley dip (local elevation minimum between La Source and Raidillon, ~1040 m from Start)
+const idxAtDist = d => Math.round((((d % TRACK_LEN) + TRACK_LEN) % TRACK_LEN) / (TRACK_LEN / N)) % N;
+let iDip = idxAtDist(800);
+for (let i = idxAtDist(800); i <= idxAtDist(1250); i++) {
+  if (samples[i].p.y < samples[iDip].p.y) iDip = i;
 }
 
-function addGrandstand(index, offset, rows, width) {
-  const { p, s } = placeBeside(index, offset);
+function placeBeside(index, offset, rows, width, preferSign = 1) {
+  // choose a side whose entire grandstand footprint clears the track & guardrails
+  const s = samples[((index % N) + N) % N];
+  const minClear = TRACK_HALF_W + 10;
+  for (const sign of [preferSign, -preferSign]) {
+    const p = s.p.clone().addScaledVector(s.x, sign * offset);
+    const fx = -sign * s.x.x, fz = -sign * s.x.z;
+    const rx = fz, rz = -fx;
+    let ok = true;
+    for (let u = -1; u <= 1 && ok; u += 0.5) {
+      for (const lz of [2, -rows * 1.2 - 1]) {
+        const lx = u * (width / 2 + 1.5);
+        if (nearestTrack(p.x + rx * lx + fx * lz, p.z + rz * lx + fz * lz, true).d < minClear) ok = false;
+      }
+    }
+    if (ok) return { p, s, sign };
+  }
+  return { p: s.p.clone().addScaledVector(s.x, preferSign * offset), s, sign: preferSign };
+}
+
+function addGrandstand(index, offset, rows, width, preferSign = 1) {
+  const { p, s } = placeBeside(index, offset, rows, width, preferSign);
   const gs = createGrandstand(rows, width);
   gs.position.set(p.x, 0, p.z);
   gs.lookAt(s.p.x, 0, s.p.z);
@@ -537,24 +677,26 @@ function addGrandstand(index, offset, rows, width) {
   return gs.position.clone();
 }
 const standSpots = [
-  addGrandstand(iDip + 135, 30, 10, 46),
-  addGrandstand(iDip + 150, 26, 8, 36),
-  addGrandstand(GRID_I, 30, 9, 40)              // overlooking the start grid
+  addGrandstand(iDip + 80, 28, 10, 48, 1),          // Gold 3 overlooking Eau Rouge / Raidillon
+  addGrandstand(iDip + 170, 28, 9, 42, 1),          // upper Raidillon climb
+  addGrandstand(GRID_I, 28, 10, 56, 1),             // Start/Finish main grandstand
+  addGrandstand(idxAtDist(395), 26, 8, 36, 1),      // La Source (T1) hairpin
+  addGrandstand(idxAtDist(6750), 26, 8, 36, 1)      // Bus Stop chicane entry (outside T18)
 ];
 
-// Trackside boards along the climb
+// Trackside boards along the Eau Rouge -> Raidillon climb
 {
   const boardMats = [
-    new THREE.MeshStandardMaterial({ map: boardTexture('ARDENNES CIRCUIT', '#13233f', '#ffffff'), roughness: 0.6 }),
-    new THREE.MeshStandardMaterial({ map: boardTexture('ENDURANCE · OPEN WHEEL', '#f2efe6', '#b5121b'), roughness: 0.6 }),
-    new THREE.MeshStandardMaterial({ map: boardTexture('GOLDEN HOUR SESSION', '#ffb26b', '#1b120a'), roughness: 0.6 })
+    new THREE.MeshStandardMaterial({ map: boardTexture('SPA-FRANCORCHAMPS', '#13233f', '#ffffff'), roughness: 0.6 }),
+    new THREE.MeshStandardMaterial({ map: boardTexture('EAU ROUGE · RAIDILLON', '#f2efe6', '#b5121b'), roughness: 0.6 }),
+    new THREE.MeshStandardMaterial({ map: boardTexture('ENDURANCE · OPEN WHEEL', '#f2c200', '#1b120a'), roughness: 0.6 })
   ];
   const geo = new THREE.PlaneGeometry(9, 1.1);
-  for (let k = 0; k < 9; k++) {
-    const idx = iDip - 30 + k * 22;
+  for (let k = 0; k < 12; k++) {
+    const idx = (iDip - 40 + k * 28 + N) % N;
     const s = samples[idx];
     for (const side of [-1, 1]) {
-      const p = s.p.clone().addScaledVector(s.x, side * (TRACK_HALF_W + 8.2));
+      const p = s.p.clone().addScaledVector(s.x, side * (railOff(side, idx) - 0.3));
       const b = new THREE.Mesh(geo, boardMats[(k + (side > 0 ? 1 : 0)) % boardMats.length]);
       b.position.set(p.x, s.p.y + 0.25, p.z);
       b.lookAt(s.p.x, s.p.y + 0.25, s.p.z);
@@ -565,9 +707,9 @@ const standSpots = [
 }
 
 /* =====================================================================
-   6. PINE FOREST (instanced cones + cylinders)
+   6. PINE FOREST (instanced cones + cylinders across the Ardennes)
    ===================================================================== */
-function createForest(count = 3600) {
+function createForest(count = 7500) {
   const trunkGeo = new THREE.CylinderGeometry(0.25, 0.4, 2.4, 6).translate(0, 1.2, 0);
   const lowGeo = new THREE.ConeGeometry(2.4, 5.2, 12).translate(0, 4.4, 0);
   const highGeo = new THREE.ConeGeometry(1.65, 4.2, 12).translate(0, 7.4, 0);
@@ -581,14 +723,14 @@ function createForest(count = 3600) {
   let placed = 0, tries = 0;
   while (placed < count && tries < count * 8) {
     tries++;
-    const ang = rand() * Math.PI * 2, rad = 25 + Math.sqrt(rand()) * 680;
-    const x = Math.cos(ang) * rad, z = Math.sin(ang) * rad - 10;
-    // patchy forest density
-    const dens = 0.5 + 0.5 * Math.sin(x * 0.018 + 1.3) * Math.cos(z * 0.021 - 0.4);
+    const ang = rand() * Math.PI * 2, rad = 25 + Math.sqrt(rand()) * 1450;
+    const x = Math.cos(ang) * rad, z = Math.sin(ang) * rad;
+    // patchy Ardennes forest density
+    const dens = 0.5 + 0.5 * Math.sin(x * 0.011 + 1.3) * Math.cos(z * 0.013 - 0.4);
     if (rand() > dens + 0.25) continue;
-    if (Math.hypot(x, z + 10) < TRACK_R + 80 && nearestTrack(x, z).d < TRACK_HALF_W + 15) continue;
-    if (standSpots.some(s => Math.hypot(s.x - x, s.z - z) < 34)) continue;
-    const s = 0.7 + rand() * 0.9;
+    if (Math.hypot(x, z) < TRACK_R + 90 && nearestTrack(x, z).d < TRACK_HALF_W + 14) continue;
+    if (standSpots.some(s => Math.hypot(s.x - x, s.z - z) < 38)) continue;
+    const s = 0.75 + rand() * 0.95;
     pos.set(x, groundHeight(x, z) - 0.2, z);
     q.setFromAxisAngle(UP, rand() * Math.PI * 2);
     sc.set(s, s * (0.85 + rand() * 0.4), s);
@@ -1598,12 +1740,12 @@ const FOV = { lowangle: 42, follow: 48, chase: 58, aerial: 48, onboard: 72 };
 const ONBOARD_ROT = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.05, Math.PI, 0, 'YXZ'));
 
 function setLowAngle() {
-  // Low, just off the asphalt in the dip, looking up the climb
-  const s = samples[(iDip - 22 + N) % N];
+  // Iconic low-angle camera at the bottom of Eau Rouge looking straight up the Raidillon climb
+  const s = samples[(iDip - 32 + N) % N];
   const p = s.p.clone().addScaledVector(s.x, -(TRACK_HALF_W + 2.5));
-  camera.position.set(p.x, s.p.y + 0.55, p.z);
-  const t = samples[(iDip + 115) % N].p;
-  controls.target.set(t.x, t.y + 2.5, t.z);
+  camera.position.set(p.x, s.p.y + 0.65, p.z);
+  const t = samples[(iDip + 185) % N].p;
+  controls.target.set(t.x, t.y + 3.5, t.z);
 }
 function setFollow() {
   const f = target.frame;
@@ -1611,8 +1753,8 @@ function setFollow() {
   camera.position.copy(focus).addScaledVector(f.t, -14).addScaledVector(f.x, 9).addScaledVector(UP, 4);
 }
 function setAerial() {
-  controls.target.set(10, 12, -10);
-  camera.position.set(-345, 285, 390);
+  controls.target.set(0, 45, 0);
+  camera.position.set(-960, 1320, 1220);
 }
 
 const modeButtons = document.querySelectorAll('#controls [data-mode]');
@@ -1648,12 +1790,12 @@ function startRace() {
 }
 function startOvertake() {
   state.raceT = GO;   // lights already out
-  // F1 #44 sits in the tow of Hypercar #8 on the downhill run into the Red Water dip; the other two trail far behind
-  const d = samples[iDip].dist - 110;
-  resetRacer(racers[3], d, 0, 28);
-  resetRacer(racers[0], d - 10, 0, 28);   // closes in ~3 s and goes through on the inside at the dip
-  resetRacer(racers[2], d - 150, 0, 40);
-  resetRacer(racers[1], d - 190, 0, 40);
+  // F1 #44 sits in the tow of Hypercar #8 on the downhill run from La Source into Eau Rouge -> Raidillon
+  const d = samples[iDip].dist - 180;
+  resetRacer(racers[3], d, 0, 56);
+  resetRacer(racers[0], d - 12, 0, 58);   // closes in on the dip and sweeps past up Raidillon
+  resetRacer(racers[2], d - 180, 0, 62);
+  resetRacer(racers[1], d - 230, 0, 62);
   target = racers[0];
   placeCars(0);
   setMode('chase');
