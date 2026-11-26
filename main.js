@@ -500,6 +500,78 @@ const startLights = [];                         // one material per red light, s
   scene.add(gantry);
 }
 
+/* ---------- 3c. DRS Activation Zones (Kemmel Straight & Start/Finish Straight) ---------- */
+// Official Spa-Francorchamps DRS zones: Kemmel Straight (after Raidillon -> Les Combes) & Start/Finish (after Bus Stop -> La Source)
+const DRS_ZONES = [
+  { name: 'Kemmel Straight', start: 1480, end: 2330 },
+  { name: 'Start/Finish',    start: 6865, end: 310  }
+];
+function inDrsZone(dist) {
+  const d = ((dist % TRACK_LEN) + TRACK_LEN) % TRACK_LEN;
+  return DRS_ZONES.some(z => z.start < z.end ? (d >= z.start && d <= z.end) : (d >= z.start || d <= z.end));
+}
+{
+  const drsLineMat = new THREE.MeshStandardMaterial({ color: 0xf4f2ea, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: -2 });
+  // Painted tarmac "DRS" stencil texture
+  const stencilCanvas = document.createElement('canvas');
+  stencilCanvas.width = 512; stencilCanvas.height = 160;
+  const sg = stencilCanvas.getContext('2d');
+  sg.fillStyle = '#00e676'; sg.fillRect(16, 12, 480, 14); sg.fillRect(16, 134, 480, 14);
+  sg.fillStyle = '#f4f2ea'; sg.font = '800 104px "Barlow Condensed", sans-serif';
+  sg.textAlign = 'center'; sg.textBaseline = 'middle';
+  sg.fillText('DRS', 256, 82);
+  const stencilTex = new THREE.CanvasTexture(stencilCanvas);
+  stencilTex.colorSpace = THREE.SRGBColorSpace;
+  stencilTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  const stencilMat = new THREE.MeshStandardMaterial({
+    map: stencilTex, transparent: true, alphaTest: 0.1, roughness: 0.6,
+    polygonOffset: true, polygonOffsetFactor: -2
+  });
+
+  // Trackside FIA DRS activation board texture
+  const signCanvas = document.createElement('canvas');
+  signCanvas.width = 256; signCanvas.height = 128;
+  const bg = signCanvas.getContext('2d');
+  bg.fillStyle = '#11161d'; bg.fillRect(0, 0, 256, 128);
+  bg.strokeStyle = '#00e676'; bg.lineWidth = 10; bg.strokeRect(5, 5, 246, 118);
+  bg.fillStyle = '#00e676'; bg.fillRect(0, 0, 256, 22);
+  bg.fillStyle = '#ffffff'; bg.font = '800 76px "Barlow Condensed", sans-serif';
+  bg.textAlign = 'center'; bg.textBaseline = 'middle';
+  bg.fillText('DRS', 128, 76);
+  const signTex = new THREE.CanvasTexture(signCanvas);
+  signTex.colorSpace = THREE.SRGBColorSpace;
+  signTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  const signMat = new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.45 });
+  const signBackMat = new THREE.MeshStandardMaterial({ color: 0x1b2028, roughness: 0.7 });
+  const postMat = new THREE.MeshStandardMaterial({ color: 0x6f7680, metalness: 0.7, roughness: 0.4 });
+  const boardMats = [signBackMat, signBackMat, signBackMat, signBackMat, signBackMat, signMat];
+
+  for (const z of DRS_ZONES) {
+    // White activation line across the asphalt + tarmac DRS stencil just past the line
+    const line = new THREE.Mesh(new THREE.PlaneGeometry(TRACK_HALF_W * 2, 0.5).rotateX(-Math.PI / 2), drsLineMat);
+    placeOnTrack(line, z.start, 0, 0.02);
+    line.receiveShadow = true;
+    scene.add(line);
+
+    const stencil = new THREE.Mesh(new THREE.PlaneGeometry(5.6, 1.8).rotateX(-Math.PI / 2).rotateY(Math.PI), stencilMat);
+    placeOnTrack(stencil, z.start + 3.2, 0, 0.022);
+    stencil.receiveShadow = true;
+    scene.add(stencil);
+
+    // Twin trackside DRS activation signboards facing oncoming cars (-Z)
+    const idx = Math.round((((z.start % TRACK_LEN) + TRACK_LEN) % TRACK_LEN) / (TRACK_LEN / N)) % N;
+    for (const side of [-1, 1]) {
+      const sign = new THREE.Group();
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.4, 8), postMat);
+      post.position.y = 1.0; post.castShadow = true; sign.add(post);
+      const board = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.95, 0.08), boardMats);
+      board.position.y = 2.05; board.castShadow = true; sign.add(board);
+      placeOnTrack(sign, z.start, side * (railOff(side, idx) - 0.35), -0.35);
+      scene.add(sign);
+    }
+  }
+}
+
 /* =====================================================================
    4. TERRAIN (Ardennes hills following Spa's real 105 m elevation range)
    ===================================================================== */
@@ -1058,9 +1130,13 @@ function createOpenWheelCar(number, tcamColor) {
   const plateMat = new THREE.MeshStandardMaterial({ map: boardTexture(String(number), '#0d0e10', '#f4f4f4', 256), roughness: 0.5 });
   for (const sx of [-1, 1]) addPart(car, new THREE.PlaneGeometry(0.3, 0.15), plateMat, sx * 0.538, 0.7, -2.42, 0, sx * Math.PI / 2);
 
-  // --- rear wing on a single pylon, with a beam wing, DRS pod and rain light
+  // --- rear wing on a single pylon, with a beam wing, movable DRS flap, DRS pod and rain light
   addPart(car, aerofoil(0.32, 0.1, 1.03), silver, 0, 0.8, -2.36, 0.15);
-  addPart(car, aerofoil(0.2, 0.09, 1.03, 0.03), teal, 0, 0.885, -2.56, 0.62);
+  const drsFlap = new THREE.Group();
+  drsFlap.position.set(0, 0.935, -2.63);   // trailing-edge hinge pivot near top of endplate
+  drsFlap.rotation.x = 0.62;               // closed angle (high downforce); opens toward 0.02 when DRS active
+  addPart(drsFlap, aerofoil(0.2, 0.09, 1.03, 0.03), teal, 0, 0, 0.085);
+  car.add(drsFlap);
   addPart(car, aerofoil(0.18, 0.1, 0.8), black, 0, 0.36, -2.3, 0.3);
   for (const sx of [-1, 1]) {
     addPart(car, sideExtrude([[-2.15, 0.4], [-2.15, 0.96], [-2.68, 0.99], [-2.68, 0.36], [-2.4, 0.3]], 0.014, sx * 0.53), black);
@@ -1092,6 +1168,7 @@ function createOpenWheelCar(number, tcamColor) {
 
   car.userData = {
     wheels,
+    drsFlap,
     dustPoints: [new THREE.Vector3(-0.8, 0.12, -2.15), new THREE.Vector3(0.8, 0.12, -2.15)],
     vortexPoints: [new THREE.Vector3(-0.53, 0.99, -2.68), new THREE.Vector3(0.53, 0.99, -2.68)],
     onboard: new THREE.Vector3(0, 1.16, -0.42)  // T-cam: halo, nose and front wheels in view
@@ -1575,7 +1652,8 @@ const gNormal = heading.map((_, i) => G * Math.hypot(samples[i].t.x, samples[i].
 const slope = heading.map((_, i) => samples[i].t.y);
 
 // Per-kg car model. mu: tyre friction; aero: downforce per v^2; power: W/kg; drag: a = drag v^2; soft: suspension travel
-const OW = { mu: 1.75, aero: 0.0035, power: 700, drag: 0.0010, soft: 1 };
+// drsDrag / drsAero: F1 DRS multipliers when the rear-wing flap opens inside a DRS activation zone
+const OW = { mu: 1.75, aero: 0.0035, power: 700, drag: 0.0010, soft: 1, drsDrag: 0.76, drsAero: 0.88 };
 const HC = { mu: 1.55, aero: 0.0024, power: 520, drag: 0.0006, soft: 1.6 };
 
 // Normal force per kg: gravity + downforce + the road pushing up in a dip / falling away over a crest
@@ -1587,11 +1665,11 @@ const cornerSpeed = (c, k, gN, kV) => {
 };
 // Highest speed at every sample (on the racing line) from which the car can still brake for what lies ahead
 function speedProfile(c) {
-  const vTop = Math.cbrt(c.power / c.drag);                     // where drag eats all the power
+  const vTop = Math.cbrt(c.power / (c.drag * (c.drsDrag ? c.drsDrag * 0.8 : 1)));   // room for DRS + slipstream on straights
   const v = kappa.map((k, i) => Math.min(vTop, cornerSpeed(c, k, gNormal[i], kappaV[i])));
   for (let n = 2 * N; n-- > 0;) {                               // backwards, two laps so it wraps the loop
     const i = n % N, j = (i + 1) % N, vj = v[j], lat = vj * vj * Math.abs(kappa[j]);
-    // grip left for braking after cornering, helped by drag and by gravity when climbing
+    // grip left for braking after cornering, helped by drag and by gravity when climbing (DRS closed under braking)
     const brake = Math.sqrt(Math.max(0, (c.mu * load(c, vj, gNormal[j], kappaV[j])) ** 2 - lat * lat)) + c.drag * vj * vj + G * slope[j];
     v[i] = Math.min(v[i], Math.sqrt(vj * vj + 2 * Math.max(0, brake) * segLen[i]));
   }
@@ -1654,12 +1732,21 @@ function stepPhysics(dt) {
     const off = Math.max(0.3, 1 - k * r.off);            // off-line: the inside is shorter but tighter
     r.curv = k / off;
     r.aLat = v * v * r.curv;
-    r.load = load(c, v, gN, kV);
+
+    // --- DRS: F1 rear-wing flap opens inside activation zones when accelerating in low-G conditions, closes on braking
+    const vBrk = interp(r.vmax, d);
+    const brakingAhead = v >= vBrk - 0.8 && interp(r.vmax, d + 10) < vBrk - 0.4;
+    r.drs = Boolean(c.drsDrag) && state.raceT >= r.launch + 0.5 && inDrsZone(d)
+            && v > 32 && Math.abs(r.aLat) < 12 && !brakingAhead && cap > v + 0.8;
+    const aeroEff = r.drs ? c.aero * c.drsAero : c.aero;
+    const dragEff = (draft ? 0.65 : 1) * (r.drs ? c.drsDrag : 1) * c.drag;
+
+    r.load = clamp(gN + (aeroEff + kV) * v * v, 0, LOAD_MAX);
     const tyre = Math.sqrt(Math.max(0, (c.mu * r.load) ** 2 - r.aLat ** 2));
     const a = Math.min(TRACTION * tyre, c.power / Math.max(v, 5))
-            - (draft ? 0.65 : 1) * c.drag * v * v        // slipstream cuts drag
+            - dragEff * v * v                            // slipstream + DRS cut aerodynamic drag
             - G * interp(slope, d);                      // gravity on the slope
-    r.speed = Math.max(0, Math.min(v + a * dt, interp(r.vmax, d), cornerSpeed(c, r.curv, gN, kV), cap));
+    r.speed = Math.max(0, Math.min(v + a * dt, vBrk, cornerSpeed(c, r.curv, gN, kV), cap));
     r.aLong = (r.speed - v) / dt;
     r.dist += r.speed * dt / (interp(segLen, d) / DS * off);   // ground speed -> progress along the centreline
     r.lat = clamp(lineAt(r.dist) + r.off, -LAT_LIM, LAT_LIM);   // the line may swing toward the edge while the car is off it
@@ -1699,7 +1786,7 @@ function resolveCollisions() {
 
 // off = lateral offset from the racing line
 function resetRacer(r, dist, off, speed, launch = 0) {
-  Object.assign(r, { dist, off, speed, launch, lat: lineAt(dist) + off, latVel: 0, curv: 0, aLat: 0, aLong: 0, load: G, roll: 0, pitch: 0, heave: 0 });
+  Object.assign(r, { dist, off, speed, launch, lat: lineAt(dist) + off, latVel: 0, curv: 0, aLat: 0, aLong: 0, load: G, roll: 0, pitch: 0, heave: 0, drs: false, drsPos: 0 });
   r.car.userData.prev = {};   // or the particle trails would streak across the teleport
 }
 
@@ -1724,6 +1811,11 @@ function placeCars(dt) {
     // front wheels steer to the curvature of the path (bicycle model)
     const steer = Math.atan(ud.wheelbase * r.curv);
     for (const w of ud.wheels.slice(0, 2)) w.group.rotation.y += (steer - w.group.rotation.y) * ease;
+    // F1 rear-wing DRS flap actuator (~0.18 s open/close)
+    if (ud.drsFlap) {
+      r.drsPos += ((r.drs ? 1 : 0) - r.drsPos) * (1 - Math.exp(-16 * (dt || 0.016)));
+      ud.drsFlap.rotation.x = lerp(0.62, 0.02, r.drsPos);
+    }
     r.car.updateMatrixWorld();
     for (const w of r.car.userData.wheels) w.spin.rotation.x += (r.speed * dt) / w.r;
     if (dt > 0 && r.speed > 3) emitFromCar(r.car, r.frame, r.speed, dt);
@@ -2052,7 +2144,9 @@ function animate() {
     hudTimer = 0;
     tagEl.textContent = state.raceT < GO ? `START · LAMPU ${lit}/5` : 'LIVE · GOLDEN HOUR';
     const order = [...racers].sort((a, b) => b.dist - a.dist);
-    for (const r of racers) r.el.textContent = `P${order.indexOf(r) + 1} · ${Math.round(r.speed * 3.6)} km/j`;
+    for (const r of racers) {
+      r.el.innerHTML = `${r.drs ? '<em class="drs">DRS</em>' : ''}P${order.indexOf(r) + 1} · ${Math.round(r.speed * 3.6)} km/j`;
+    }
   }
   renderer.render(scene, camera);
 }

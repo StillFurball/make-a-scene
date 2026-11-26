@@ -29,7 +29,12 @@ canvas { display: block; }
 .car.active { background: rgba(255,255,255,.12); border-color: var(--accent); }
 .car i { height: 8px; border-radius: 4px; }
 .car b { font-weight: 500; }
-.car span { font-weight: 800; font-variant-numeric: tabular-nums; min-width: 104px; text-align: right; }
+.car span { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; font-weight: 800; font-variant-numeric: tabular-nums; min-width: 146px; text-align: right; }
+.car .drs {
+  font-style: normal; font-size: 11px; font-weight: 800; letter-spacing: .08em; line-height: 1.2;
+  padding: 1px 5px; border-radius: 4px; background: #00e676; color: #071b10;
+  box-shadow: 0 0 8px rgba(0, 230, 118, 0.45);
+}
 
 #controls {
   bottom: 16px; left: 50%; transform: translateX(-50%);
